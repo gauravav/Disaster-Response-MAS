@@ -42,7 +42,7 @@ if city_grid is not None:
     for _, row in city_grid.iterrows():
         elevation_grid[row["x"], row["y"]] = row["elevation"]
 
-    cmap = plt.cm.YlOrBr
+    cmap = cm.get_cmap('YlOrBr')
     elev_img = ax.imshow(elevation_grid, cmap=cmap, origin="upper")
 
     for _, row in city_grid.iterrows():
@@ -129,7 +129,7 @@ if city_grid is not None:
                 flood_grid[fx, fy] = 1
 
             fig, ax = plt.subplots(figsize=(6, 6))
-            cax = ax.imshow(flood_grid, cmap=plt.cm.Blues, origin="lower")
+            cax = ax.imshow(flood_grid, cmap=plt.get_cmap('Blues'), origin="lower")
 
             tick_step = max(grid_size // 10, 1)
             ax.set_xticks(np.arange(0, grid_size, tick_step))
