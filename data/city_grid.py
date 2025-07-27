@@ -19,6 +19,7 @@ def create_city_grid(size=20, num_stations=6):
                 "zone_type": np.random.choice(["residential", "commercial", "industrial"]),
                 "population": np.random.randint(50, 1000),
                 "elevation": np.random.uniform(0, 100),
+                "water_level": round(np.random.uniform(0, 5), 2),  # in meters
                 "station_type": None,
                 "dispatch_radius": None,
                 "max_teams": None,
