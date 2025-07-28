@@ -1,5 +1,5 @@
-from agents.base_agent import BaseAgent
-from simulation.event_queue import event_queue_v3
+from Proj_1.agents.base_agent import BaseAgent
+from Proj_1.simulation.event_queue import event_queue_v3
 
 class SensorAgent(BaseAgent):
     def __init__(self, unique_id, sensor_data, sensor_threshold=2.0):

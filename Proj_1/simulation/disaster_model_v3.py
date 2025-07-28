@@ -1,5 +1,5 @@
-from agents.social_media_agent import SocialMediaAgent
-from agents.sensor_agent import SensorAgent
+from Proj_1.agents.social_media_agent import SocialMediaAgent
+from Proj_1.agents.sensor_agent import SensorAgent
 
 class DisasterModelV3:
     def __init__(self, tweets, sensor_data, sensor_threshold):

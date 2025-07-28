@@ -6,7 +6,7 @@ import matplotlib.cm as cm
 import time
 from matplotlib.colors import ListedColormap
 
-from data.city_grid import create_city_grid
+from Proj_1.data.city_grid import create_city_grid
 
 FIGSIZE = (6, 6)
 

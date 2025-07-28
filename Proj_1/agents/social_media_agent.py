@@ -1,6 +1,6 @@
 import re
-from agents.base_agent import BaseAgent
-from simulation.event_queue import event_queue_v3
+from Proj_1.agents.base_agent import BaseAgent
+from Proj_1.simulation.event_queue import event_queue_v3
 
 class SocialMediaAgent(BaseAgent):
     def __init__(self, unique_id, tweet_source):
