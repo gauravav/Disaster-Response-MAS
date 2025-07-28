@@ -5,8 +5,11 @@ import geopandas as gpd
 import numpy as np
 import matplotlib.pyplot as plt
 from shapely.geometry import box
-import rasterio.transform
-from rasterio.warp import transform_bounds
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set matplotlib backend for Streamlit
+plt.switch_backend('Agg')
 
 # -------------------------------
 # Streamlit Setup
@@ -45,26 +48,82 @@ except Exception as e:
 # Fetch elevation using py3dep
 with st.spinner("Downloading elevation data..."):
     try:
-        # Get DEM data with proper bbox format
-        dem_data = py3dep.get_dem(
-            geometry=place_geom,
-            resolution=30,  # 30m resolution for better performance
-            crs="EPSG:4326"
-        )
+        st.info("Attempting to download elevation data...")
 
-        # Extract elevation array and transform
-        elev_array = dem_data.values.squeeze()
-        transform = dem_data.rio.transform()
+        # Method 1: Try using geometry directly
+        try:
+            dem_data = py3dep.get_dem(
+                geometry=place_geom,
+                resolution=30,  # 30m resolution
+                crs="EPSG:4326"
+            )
+            elev_array = dem_data.values.squeeze()
+            dem_bounds = dem_data.rio.bounds()
+            extent = [dem_bounds[0], dem_bounds[2], dem_bounds[1], dem_bounds[3]]
+            st.success("✅ Method 1: Geometry-based download successful")
 
-        # Get the actual bounds of the DEM data
-        dem_bounds = dem_data.rio.bounds()
-        extent = [dem_bounds[0], dem_bounds[2], dem_bounds[1], dem_bounds[3]]  # [west, east, south, north]
+        except Exception as e1:
+            st.warning(f"Method 1 failed: {e1}")
+            st.info("Trying alternative method...")
 
-        st.success(f"Elevation data downloaded: {elev_array.shape} pixels")
+            # Method 2: Use bounding box with py3depdem
+            try:
+                dem_data = py3dep.get_dem(
+                    bbox=py3dep_bbox,
+                    resolution=30,
+                    crs="EPSG:4326"
+                )
+                elev_array = dem_data.values.squeeze()
+                dem_bounds = dem_data.rio.bounds()
+                extent = [dem_bounds[0], dem_bounds[2], dem_bounds[1], dem_bounds[3]]
+                st.success("✅ Method 2: Bbox-based download successful")
+
+            except Exception as e2:
+                st.warning(f"Method 2 failed: {e2}")
+                st.info("Trying simplified approach...")
+
+                # Method 3: Simple approach with basic parameters
+                try:
+                    bbox_simple = [bounds[1], bounds[0], bounds[3], bounds[2]]  # south, west, north, east
+                    dem_data = py3dep.get_dem(bbox_simple, resolution=90)  # Lower resolution
+                    elev_array = dem_data.squeeze()
+
+                    # Create extent manually
+                    extent = [bounds[0], bounds[2], bounds[1], bounds[3]]
+                    st.success("✅ Method 3: Simple download successful")
+
+                except Exception as e3:
+                    st.error(f"All elevation download methods failed:")
+                    st.error(f"Method 1: {e1}")
+                    st.error(f"Method 2: {e2}")
+                    st.error(f"Method 3: {e3}")
+                    st.stop()
+
+        # Validate elevation data
+        if elev_array is None or elev_array.size == 0:
+            st.error("Downloaded elevation data is empty")
+            st.stop()
+
+        # Handle NaN values
+        nan_count = np.isnan(elev_array).sum()
+        total_pixels = elev_array.size
+
+        if nan_count == total_pixels:
+            st.error("All elevation values are NaN - no valid data for this location")
+            st.stop()
+        elif nan_count > 0:
+            st.warning(f"Found {nan_count}/{total_pixels} NaN values in elevation data")
+            # Replace NaN with mean for visualization
+            elev_array = np.where(np.isnan(elev_array), np.nanmean(elev_array), elev_array)
+
+        # Display elevation statistics
+        st.success(f"Elevation data: {elev_array.shape} pixels")
         st.info(f"Elevation range: {np.nanmin(elev_array):.1f}m to {np.nanmax(elev_array):.1f}m")
+        st.info(f"Data extent: {extent}")
 
     except Exception as e:
-        st.error(f"Failed to download elevation data: {e}")
+        st.error(f"Critical error downloading elevation data: {e}")
+        st.error("Please try a different location or check your internet connection")
         st.stop()
 
 # -------------------------------
@@ -145,84 +204,134 @@ if show_rivers or show_buildings:
 
 # -------------------------------
 # Plotting
-fig, ax = plt.subplots(figsize=(12, 10))
+with st.spinner("Creating visualization..."):
+    try:
+        # Create figure with explicit DPI and size
+        fig, ax = plt.subplots(figsize=(12, 10), dpi=100)
+        plt.style.use('default')  # Use default matplotlib style
 
-try:
-    # Plot elevation as base layer
-    elev_img = ax.imshow(
-        elev_array,
-        cmap='terrain',
-        extent=extent,
-        origin='upper',
-        alpha=0.8
-    )
+        # Check if elevation data is valid
+        if elev_array.size == 0:
+            st.error("No elevation data to display")
+            st.stop()
 
-    # Add colorbar for elevation
-    cbar = fig.colorbar(elev_img, ax=ax, label="Elevation (m)", shrink=0.8)
+        # Plot elevation as base layer with error handling
+        try:
+            elev_img = ax.imshow(
+                elev_array,
+                cmap='terrain',
+                extent=extent,
+                origin='upper',
+                alpha=0.9,
+                interpolation='bilinear'
+            )
 
-    # Plot flood overlay
-    if np.any(flood_mask):
-        # Create masked array for flood areas
-        flood_overlay = np.ma.masked_where(~flood_mask, np.ones_like(flood_mask))
-        ax.imshow(
-            flood_overlay,
-            cmap='Blues',
-            alpha=0.6,
-            extent=extent,
-            origin='upper',
-            vmin=0,
-            vmax=1
-        )
+            # Add colorbar for elevation
+            cbar = fig.colorbar(elev_img, ax=ax, label="Elevation (m)", shrink=0.8, pad=0.02)
+            cbar.ax.tick_params(labelsize=10)
 
-    # Plot rivers
-    if show_rivers and gdf_rivers is not None and not gdf_rivers.empty:
-        gdf_rivers.plot(
-            ax=ax,
-            facecolor='none',
-            edgecolor='cyan',
-            linewidth=1.5,
-            alpha=0.8
-        )
+        except Exception as e:
+            st.error(f"Error plotting elevation: {e}")
+            st.write(f"Elevation array shape: {elev_array.shape}")
+            st.write(f"Elevation extent: {extent}")
+            st.write(f"Elevation data type: {elev_array.dtype}")
+            st.stop()
 
-    # Plot buildings
-    if show_buildings and gdf_buildings is not None and not gdf_buildings.empty:
-        gdf_buildings.plot(
-            ax=ax,
-            facecolor='red',
-            edgecolor='darkred',
-            linewidth=0.5,
-            alpha=0.7
-        )
+        # Plot flood overlay
+        if np.any(flood_mask):
+            try:
+                # Create masked array for flood areas
+                flood_overlay = np.ma.masked_where(~flood_mask, np.ones_like(flood_mask))
+                flood_img = ax.imshow(
+                    flood_overlay,
+                    cmap='Blues',
+                    alpha=0.6,
+                    extent=extent,
+                    origin='upper',
+                    vmin=0,
+                    vmax=1
+                )
+            except Exception as e:
+                st.warning(f"Error adding flood overlay: {e}")
 
-    # Set labels and title
-    ax.set_title(f"Flood Simulation: {place}\nWater Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%",
-                 fontsize=14, pad=20)
-    ax.set_xlabel("Longitude", fontsize=12)
-    ax.set_ylabel("Latitude", fontsize=12)
+        # Plot rivers
+        if show_rivers and gdf_rivers is not None and not gdf_rivers.empty:
+            try:
+                gdf_rivers.plot(
+                    ax=ax,
+                    facecolor='none',
+                    edgecolor='cyan',
+                    linewidth=1.5,
+                    alpha=0.8
+                )
+            except Exception as e:
+                st.warning(f"Error plotting rivers: {e}")
 
-    # Add grid for better readability
-    ax.grid(True, alpha=0.3)
+        # Plot buildings
+        if show_buildings and gdf_buildings is not None and not gdf_buildings.empty:
+            try:
+                gdf_buildings.plot(
+                    ax=ax,
+                    facecolor='red',
+                    edgecolor='darkred',
+                    linewidth=0.5,
+                    alpha=0.7
+                )
+            except Exception as e:
+                st.warning(f"Error plotting buildings: {e}")
 
-    # Set aspect ratio to equal for proper geographic display
-    ax.set_aspect('equal')
+        # Set labels and title
+        ax.set_title(f"Flood Simulation: {place}\nWater Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%",
+                     fontsize=14, pad=20)
+        ax.set_xlabel("Longitude", fontsize=12)
+        ax.set_ylabel("Latitude", fontsize=12)
 
-    # Add legend
-    legend_elements = []
-    if show_rivers and gdf_rivers is not None and not gdf_rivers.empty:
-        legend_elements.append(plt.Line2D([0], [0], color='cyan', lw=2, label='Waterways'))
-    if show_buildings and gdf_buildings is not None and not gdf_buildings.empty:
-        legend_elements.append(plt.Rectangle((0,0),1,1, facecolor='red', alpha=0.7, label='Buildings'))
-    if np.any(flood_mask):
-        legend_elements.append(plt.Rectangle((0,0),1,1, facecolor='blue', alpha=0.6, label='Flooded Area'))
+        # Add grid for better readability
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
 
-    if legend_elements:
-        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1, 1))
+        # Set aspect ratio
+        ax.set_aspect('equal', adjustable='box')
 
-    plt.tight_layout()
-    st.pyplot(fig)
+        # Add legend
+        legend_elements = []
+        if show_rivers and gdf_rivers is not None and not gdf_rivers.empty:
+            legend_elements.append(plt.Line2D([0], [0], color='cyan', lw=2, label='Waterways'))
+        if show_buildings and gdf_buildings is not None and not gdf_buildings.empty:
+            legend_elements.append(plt.Rectangle((0,0),1,1, facecolor='red', alpha=0.7, label='Buildings'))
+        if np.any(flood_mask):
+            legend_elements.append(plt.Rectangle((0,0),1,1, facecolor='blue', alpha=0.6, label='Flooded Area'))
 
-except Exception as e:
-    st.error(f"Error creating visualization: {e}")
+        if legend_elements:
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
+
+        # Adjust layout and display
+        plt.tight_layout()
+
+        # Display the plot
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+
+        # Close the figure to free memory
+        plt.close(fig)
+
+    except Exception as e:
+        st.error(f"Critical error creating visualization: {e}")
+        st.write("Debug information:")
+        st.write(f"- Elevation array shape: {elev_array.shape if 'elev_array' in locals() else 'Not available'}")
+        st.write(f"- Extent: {extent if 'extent' in locals() else 'Not available'}")
+        st.write(f"- Matplotlib backend: {plt.get_backend()}")
+
+        # Try a simple plot as fallback
+        try:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            ax.text(0.5, 0.5, f"Map loading failed for {place}\nTry a different location",
+                    ha='center', va='center', transform=ax.transAxes, fontsize=12)
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.set_title("Error Loading Map")
+            st.pyplot(fig, clear_figure=True)
+            plt.close(fig)
+        except Exception as fallback_error:
+            st.error(f"Even fallback plot failed: {fallback_error}")
 
 # -------------------------------
 # Additional Information
