@@ -4,8 +4,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import time
+from matplotlib.colors import ListedColormap
 
 from data.city_grid import create_city_grid
+
+FIGSIZE = (6, 6)
 
 st.set_page_config(layout="wide")
 st.title("🏙️ Elevation-Based City Flood Simulation")
@@ -32,37 +35,29 @@ city_grid = st.session_state["city_grid"]
 
 if city_grid is not None:
     # ---------------------
-    # 3️⃣ Elevation Map
+    # 3️⃣.1 Land vs Stream Map
     # ---------------------
-    st.subheader("🌄 Elevation Map with Emergency Stations")
+    st.subheader("🌍 Land (Brown) vs Stream (Light Blue)")
 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    elevation_grid = np.zeros((grid_size, grid_size))
-
+    land_stream_grid = np.zeros((grid_size, grid_size))  # [y, x]
     for _, row in city_grid.iterrows():
-        elevation_grid[row["x"], row["y"]] = row["elevation"]
+        if row["zone_type"] == "stream":
+            land_stream_grid[row["y"], row["x"]] = 1
 
-    cmap = cm.get_cmap('YlOrBr')
-    elev_img = ax.imshow(elevation_grid, cmap=cmap, origin="upper")
-
-    for _, row in city_grid.iterrows():
-        x, y = row["x"], row["y"]
-        station = row["station_type"]
-        if station:
-            icon = {"fire": "🔥", "police": "👮", "rescue": "🚑"}[station]
-            ax.text(y, x + 0.5, icon, ha="center", va="center", fontsize=7)
+    fig, ax = plt.subplots(figsize=FIGSIZE)
+    cmap = ListedColormap(["#DEB887", "#ADD8E6"])  # lighter brown for land, light blue for stream
+    ax.imshow(land_stream_grid, cmap=cmap, origin="lower")
 
     ax.set_xticks(np.arange(grid_size))
     ax.set_yticks(np.arange(grid_size))
     ax.set_xticklabels([])
     ax.set_yticklabels([])
-    ax.set_title("City Elevation Map")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_title("Land vs Stream (Initial View)")
     ax.grid(color='gray', linestyle='-', linewidth=0.3)
     ax.set_xlim(-0.5, grid_size - 0.5)
-    ax.set_ylim(grid_size - 0.5, -0.5)
-
-    cbar = plt.colorbar(elev_img, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Elevation")
+    ax.set_ylim(-0.5, grid_size - 0.5)
 
     st.pyplot(fig)
 
@@ -76,11 +71,18 @@ if city_grid is not None:
     # 5️⃣ Simulate Flood Flow (Live)
     # ---------------------
     st.subheader("🌊 Simulate Flood Flow (Based on Elevation + Water Level)")
-    sim_duration = st.slider("Flood Animation Duration (seconds)", 10, 120, 60)
+    # sim_duration = st.slider("Flood Animation Duration (seconds)", 10, 120, 60)
 
     if st.button("Start Flood Flow Simulation"):
-        sorted_zones = city_grid.sort_values(by=["water_level", "elevation"], ascending=[False, False])
-        source_zones = sorted_zones.head(3)[["x", "y"]].values.tolist()
+        import datetime
+        start_time = datetime.datetime.now()
+
+        # Add slider for time speed multiplier
+        # speed_multiplier = st.slider("⏱️ Time Speed Multiplier", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+
+        # ✅ Start from stream cells only
+        stream_zones = city_grid[city_grid["zone_type"] == "stream"]
+        source_zones = stream_zones.sort_values(by="water_level", ascending=False).head(3)[["x", "y"]].values.tolist()
 
         flooded = set()
         queue = [(x, y) for x, y in source_zones]
@@ -88,13 +90,15 @@ if city_grid is not None:
         flood_plot_area = st.empty()
         steps = 0
 
-        max_steps = 100
-        sleep_time = sim_duration / max_steps
-        spread_per_step = max(1, (grid_size * grid_size) // max_steps)
+        max_steps = 3780  # for 1 hour and 3 minutes
+        total_runtime_seconds = 3780  # 1 hour and 3 minutes
+        sleep_time = total_runtime_seconds / max_steps
+        base_spread = 3
 
-        st.info(f"🌀 Simulating flood over {sim_duration} seconds based on water levels...")
+        st.info(f"🌀 Simulating flood over 1 hour and 3 minutes from stream zones...")
 
         while steps < max_steps:
+            spread_per_step = base_spread + steps // 300  # increase roughly every 5 minutes
             new_queue = []
             spread_this_step = 0
 
@@ -115,38 +119,47 @@ if city_grid is not None:
                         neighbor_cell = city_grid[(city_grid["x"] == nx) & (city_grid["y"] == ny)].iloc[0]
                         if (neighbor_cell["elevation"] < current_elev or
                                 neighbor_cell["water_level"] < current_water):
-                            new_queue.append((nx, ny))
-                            visited.add((nx, ny))
-                            spread_this_step += 1
-                            if spread_this_step >= spread_per_step:
-                                break
+                            if neighbor_cell["zone_type"] != "stream":  # Avoid flooding within stream
+                                new_queue.append((nx, ny))
+                                visited.add((nx, ny))
+                                spread_this_step += 1
+                                if spread_this_step >= spread_per_step:
+                                    break
                 if spread_this_step >= spread_per_step:
                     break
 
             # Visualize current flood
-            flood_grid = np.zeros((grid_size, grid_size))
-            for fx, fy in flooded:
-                flood_grid[fx, fy] = 1
+            flood_display_grid = np.zeros((grid_size, grid_size))  # [y, x]
+            for _, row in city_grid.iterrows():
+                x, y = row["x"], row["y"]
+                if row["zone_type"] == "stream":
+                    flood_display_grid[y, x] = 1
 
-            fig, ax = plt.subplots(figsize=(6, 6))
-            cax = ax.imshow(flood_grid, cmap=plt.get_cmap('Blues'), origin="lower")
+            for fx, fy in flooded:
+                flood_display_grid[fy, fx] = 2  # mark as flooded
+
+            fig, ax = plt.subplots(figsize=FIGSIZE)
+            cmap = ListedColormap(["#DEB887", "#ADD8E6", "#00008B"])  # lighter brown, light blue, dark blue
+            cax = ax.imshow(flood_display_grid, cmap=cmap, origin="lower")
 
             tick_step = max(grid_size // 10, 1)
             ax.set_xticks(np.arange(0, grid_size, tick_step))
             ax.set_yticks(np.arange(0, grid_size, tick_step))
-            ax.set_title(f"Flood Step {steps + 1} / {max_steps}")
-            ax.set_xlabel("Y")
-            ax.set_ylabel("X")
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            elapsed_time = (datetime.datetime.now() - start_time).total_seconds()
+            ax.set_title(f"Elapsed Time: {elapsed_time:.1f}s")
             ax.grid(which='both', color='gray', linewidth=0.5)
             plt.colorbar(cax, ax=ax, label="Flooded")
 
             flood_plot_area.pyplot(fig)
+            plt.close(fig)
 
             queue = new_queue or queue
             steps += 1
             time.sleep(sleep_time)
 
-        st.success(f"✅ Flood animation completed in {steps} steps over {sim_duration} seconds.")
+        st.success(f"✅ Flood animation completed in {steps} steps over {total_runtime_seconds} seconds.")
 
         with st.expander("🗺️ Final Flooded Zone Data"):
             st.dataframe(pd.DataFrame(list(flooded), columns=["x", "y"]))
