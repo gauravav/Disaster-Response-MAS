@@ -39,14 +39,21 @@ if city_grid is not None:
     # ---------------------
     st.subheader("🌍 Land (Brown) vs Stream (Light Blue)")
 
-    land_stream_grid = np.zeros((grid_size, grid_size))  # [y, x]
+    elevation_map = np.zeros((grid_size, grid_size))
+    stream_mask = np.zeros((grid_size, grid_size))
+
     for _, row in city_grid.iterrows():
+        x, y = row["x"], row["y"]
+        elevation_map[y, x] = row["elevation"]
         if row["zone_type"] == "stream":
-            land_stream_grid[row["y"], row["x"]] = 1
+            stream_mask[y, x] = 1
 
     fig, ax = plt.subplots(figsize=FIGSIZE)
-    cmap = ListedColormap(["#DEB887", "#ADD8E6"])  # lighter brown for land, light blue for stream
-    ax.imshow(land_stream_grid, cmap=cmap, origin="lower")
+    cmap = cm.get_cmap("YlOrBr")  # continuous brown scale
+    elev_img = ax.imshow(elevation_map, cmap=cmap, origin="lower")
+    ax.imshow(np.ma.masked_where(stream_mask == 0, stream_mask), cmap=ListedColormap(["#ADD8E6"]), alpha=0.8, origin="lower")
+
+    plt.colorbar(elev_img, ax=ax, label="Elevation")
 
     ax.set_xticks(np.arange(grid_size))
     ax.set_yticks(np.arange(grid_size))
@@ -105,26 +112,35 @@ if city_grid is not None:
             for x, y in queue:
                 if (x, y) in flooded:
                     continue
+                if city_grid[(city_grid["x"] == x) & (city_grid["y"] == y)].iloc[0]["zone_type"] == "stream":
+                    directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]  # cardinal
+                else:
+                    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # default
+
                 flooded.add((x, y))
 
                 current_cell = city_grid[(city_grid["x"] == x) & (city_grid["y"] == y)].iloc[0]
                 current_elev = current_cell["elevation"]
                 current_water = current_cell["water_level"]
 
-                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                neighbors = []
+                for dx, dy in directions:
                     nx, ny = x + dx, y + dy
                     if 0 <= nx < grid_size and 0 <= ny < grid_size:
                         if (nx, ny) in visited:
                             continue
                         neighbor_cell = city_grid[(city_grid["x"] == nx) & (city_grid["y"] == ny)].iloc[0]
-                        if (neighbor_cell["elevation"] < current_elev or
-                                neighbor_cell["water_level"] < current_water):
-                            if neighbor_cell["zone_type"] != "stream":  # Avoid flooding within stream
-                                new_queue.append((nx, ny))
-                                visited.add((nx, ny))
-                                spread_this_step += 1
-                                if spread_this_step >= spread_per_step:
-                                    break
+                        if neighbor_cell["elevation"] < current_elev:
+                            neighbors.append(((nx, ny), neighbor_cell["elevation"]))
+
+                neighbors.sort(key=lambda n: n[1])  # prioritize lower elevation first
+                for (nx, ny), _ in neighbors:
+                    if city_grid[(city_grid["x"] == nx) & (city_grid["y"] == ny)].iloc[0]["zone_type"] != "stream":  # Avoid flooding within stream
+                        new_queue.append((nx, ny))
+                        visited.add((nx, ny))
+                        spread_this_step += 1
+                        if spread_this_step >= spread_per_step:
+                            break
                 if spread_this_step >= spread_per_step:
                     break
 
@@ -150,7 +166,7 @@ if city_grid is not None:
             elapsed_time = (datetime.datetime.now() - start_time).total_seconds()
             ax.set_title(f"Elapsed Time: {elapsed_time:.1f}s")
             ax.grid(which='both', color='gray', linewidth=0.5)
-            plt.colorbar(cax, ax=ax, label="Flooded")
+            # plt.colorbar(cax, ax=ax, label="Flooded")
 
             flood_plot_area.pyplot(fig)
             plt.close(fig)
