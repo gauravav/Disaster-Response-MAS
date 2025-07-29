@@ -102,21 +102,17 @@ class LocalFloodManager:
 
 class FloodSensorNetwork:
     def __init__(self, num_sensors: int = 20):
-        """Initialize flood sensor network"""
+        """Initialize flood sensor network with water level sensors only"""
         self.sensors = []
         self.num_sensors = num_sensors
+        self.last_stream_time = datetime.now()
 
     def deploy_sensors(self, extent: List[float], elev_array: np.ndarray) -> List[Dict]:
-        """Deploy sensors randomly across the map area"""
+        """Deploy water level sensors randomly across the map area"""
         sensors = []
 
-        # Sensor types and their characteristics
-        sensor_types = {
-            'water_level': {'icon': '🌊', 'color': 'blue', 'baseline': 0.1},
-            'rain_gauge': {'icon': '🌧️', 'color': 'green', 'baseline': 0.0},
-            'flow_meter': {'icon': '📏', 'color': 'purple', 'baseline': 0.2},
-            'pressure': {'icon': '⚡', 'color': 'orange', 'baseline': 0.05}
-        }
+        # Only water level sensors
+        sensor_info = {'icon': '🌊', 'color': 'blue', 'baseline': 0.1}
 
         for i in range(self.num_sensors):
             # Random location within bounds
@@ -132,13 +128,9 @@ class FloodSensorNetwork:
 
             elevation = elev_array[lat_idx, lon_idx] if lat_idx < elev_array.shape[0] else np.nanmean(elev_array)
 
-            # Select random sensor type
-            sensor_type = random.choice(list(sensor_types.keys()))
-            sensor_info = sensor_types[sensor_type]
-
             sensor = {
                 'id': f'SENSOR_{i+1:03d}',
-                'type': sensor_type,
+                'type': 'water_level',
                 'lat': lat,
                 'lon': lon,
                 'elevation': elevation,
@@ -158,7 +150,7 @@ class FloodSensorNetwork:
 
     def update_sensor_readings(self, extent: List[float], flood_mask: np.ndarray,
                                elev_array: np.ndarray, water_level: float) -> List[Dict]:
-        """Update sensor readings based on current flood conditions"""
+        """Update water level sensor readings based on current flood conditions"""
         updated_sensors = []
 
         for sensor in self.sensors:
@@ -174,32 +166,15 @@ class FloodSensorNetwork:
             # Calculate water depth at sensor
             water_depth = max(0, water_level - sensor['elevation']) if is_flooded else 0
 
-            # Update readings based on sensor type and flood conditions
-            if sensor['type'] == 'water_level':
-                if is_flooded:
-                    sensor['current_reading'] = sensor['baseline_reading'] + water_depth + random.uniform(-0.1, 0.1)
-                else:
-                    sensor['current_reading'] = sensor['baseline_reading'] + random.uniform(-0.05, 0.05)
+            # Update water level readings
+            if is_flooded:
+                # Water level reading = baseline + actual water depth + small noise
+                sensor['current_reading'] = sensor['baseline_reading'] + water_depth + random.uniform(-0.1, 0.1)
+            else:
+                # Normal baseline reading with small variations
+                sensor['current_reading'] = sensor['baseline_reading'] + random.uniform(-0.05, 0.05)
 
-            elif sensor['type'] == 'rain_gauge':
-                if is_flooded:
-                    sensor['current_reading'] = random.uniform(50, 150)  # Heavy rain mm/hr
-                else:
-                    sensor['current_reading'] = random.uniform(0, 10)  # Light/no rain
-
-            elif sensor['type'] == 'flow_meter':
-                if is_flooded:
-                    sensor['current_reading'] = sensor['baseline_reading'] + water_depth * 2 + random.uniform(0, 1)
-                else:
-                    sensor['current_reading'] = sensor['baseline_reading'] + random.uniform(-0.1, 0.1)
-
-            elif sensor['type'] == 'pressure':
-                if is_flooded:
-                    sensor['current_reading'] = sensor['baseline_reading'] + water_depth * 0.1 + random.uniform(0, 0.02)
-                else:
-                    sensor['current_reading'] = sensor['baseline_reading'] + random.uniform(-0.01, 0.01)
-
-            # Determine alert level
+            # Determine alert level based on water depth
             if is_flooded and water_depth > 2:
                 sensor['alert_level'] = 'critical'
                 sensor['status'] = 'flooding_detected'
@@ -227,6 +202,16 @@ class FloodSensorNetwork:
         self.sensors = updated_sensors
         return updated_sensors
 
+    def should_stream_data(self) -> bool:
+        """Check if 10 seconds have passed since last stream"""
+        current_time = datetime.now()
+        time_diff = (current_time - self.last_stream_time).total_seconds()
+
+        if time_diff >= 10:
+            self.last_stream_time = current_time
+            return True
+        return False
+
     def get_sensor_summary(self) -> Dict:
         """Get summary statistics of sensor network"""
         operational = sum(1 for s in self.sensors if s['status'] != 'offline')
@@ -245,8 +230,8 @@ class FloodSensorNetwork:
         }
 
     def add_sensor_data_to_stream(self, redis_client, stream_name="sensor_data"):
-        """Add all sensor readings to Redis stream"""
-        if not redis_client:
+        """Add all water level sensor readings to Redis stream every 10 seconds"""
+        if not redis_client or not self.should_stream_data():
             return False
 
         try:
@@ -294,6 +279,7 @@ class FloodTweetGenerator:
 
         self.stream_name = "flood_tweets"
         self.is_running = False
+        self.last_tweet_time = datetime.now()
 
         # Tweet templates
         self.normal_tweets = [
@@ -306,7 +292,12 @@ class FloodTweetGenerator:
             "Just finished work, heading home",
             "Weekend plans anyone? #weekend",
             "Local restaurant has amazing food! 🍕",
-            "Enjoying the sunshine today"
+            "Enjoying the sunshine today",
+            "Perfect weather for outdoor activities in {city}",
+            "Morning jog complete! Feeling great 🏃‍♂️",
+            "Coffee shop in {city} has the best wifi",
+            "Another productive day at work",
+            "Looking forward to the weekend!"
         ]
 
         self.flood_tweets_mild = [
@@ -317,7 +308,9 @@ class FloodTweetGenerator:
             "Getting a bit soggy out there",
             "Weather alert just came in for our area",
             "Streets starting to flood a little",
-            "Water levels rising in the creek"
+            "Water levels rising in the creek",
+            "Heavy rain causing some street flooding in {city}",
+            "Drainage struggling to keep up with the rain"
         ]
 
         self.flood_tweets_moderate = [
@@ -328,7 +321,9 @@ class FloodTweetGenerator:
             "Water up to my car's tires 😰",
             "Evacuation notice just issued for our area",
             "Power went out, water everywhere!",
-            "Need rescue at {street} intersection!"
+            "Need rescue at {street} intersection!",
+            "Major flooding on {street} in {city}",
+            "Emergency crews responding to flood calls"
         ]
 
         self.flood_tweets_severe = [
@@ -339,7 +334,9 @@ class FloodTweetGenerator:
             "Can't evacuate - roads completely flooded!",
             "URGENT: Need boat rescue in {city}!",
             "Water everywhere! This is catastrophic! 😱",
-            "FLASH FLOOD WARNING! Get out NOW!"
+            "FLASH FLOOD WARNING! Get out NOW!",
+            "SEVERE FLOODING - CALL 911 if trapped!",
+            "Historic flood levels in {city} - stay safe!"
         ]
 
         self.noise_tweets = [
@@ -354,7 +351,15 @@ class FloodTweetGenerator:
             "Fashion week highlights! So trendy! 👗",
             "Tech stocks are up today! 📈",
             "Movie review: Latest blockbuster disappoints",
-            "Food trend alert: Everyone's trying this! 🥑"
+            "Food trend alert: Everyone's trying this! 🥑",
+            "Stock market volatility continues 📊",
+            "New restaurant opening downtown!",
+            "Concert tickets on sale now! 🎶",
+            "Breaking: Local team wins championship!",
+            "Weather forecast looks good this week",
+            "New shopping mall opens next month",
+            "Local festival this weekend! 🎪",
+            "Best pizza in town at Mario's!"
         ]
 
         # Generate users
@@ -408,24 +413,76 @@ class FloodTweetGenerator:
         else:
             return 1.0  # Severe
 
-    def generate_tweet(self, extent: List[float], flood_mask: np.ndarray,
-                       elev_array: np.ndarray, water_level: float, city_name: str) -> Dict:
-        """Generate a single tweet"""
-        is_genuine = random.random() < 0.3  # 30% genuine
+    def should_generate_tweet(self, tweet_rate: int) -> bool:
+        """Check if it's time to generate a new tweet based on the rate"""
+        current_time = datetime.now()
+        time_diff = (current_time - self.last_tweet_time).total_seconds()
 
-        # Select user
+        # Calculate interval: tweets_per_minute to seconds_per_tweet
+        interval = 60.0 / tweet_rate if tweet_rate > 0 else 60.0
+
+        if time_diff >= interval:
+            self.last_tweet_time = current_time
+            return True
+        return False
+
+    def generate_continuous_tweets(self, extent: List[float], flood_mask: np.ndarray,
+                                   elev_array: np.ndarray, water_level: float,
+                                   city_name: str, tweet_rate: int) -> List[Dict]:
+        """Generate tweets continuously based on flood conditions"""
+        if not self.should_generate_tweet(tweet_rate):
+            return []
+
+        tweets = []
+
+        # Determine if there's significant flooding
+        flooding_percentage = (np.sum(flood_mask) / flood_mask.size) * 100 if flood_mask.size > 0 else 0
+        is_flooding = flooding_percentage > 1.0  # Consider flooding if >1% of area is flooded
+
+        # Generate 1-3 tweets per interval
+        num_tweets = random.randint(1, 3)
+
+        for _ in range(num_tweets):
+            if is_flooding:
+                # During flooding: 60% flood-related, 40% noise
+                is_flood_related = random.random() < 0.6
+
+                if is_flood_related:
+                    # 70% genuine flood tweets, 30% noise users posting about flood
+                    is_genuine = random.random() < 0.7
+                    tweet = self._generate_flood_tweet(extent, flood_mask, elev_array,
+                                                       water_level, city_name, is_genuine)
+                else:
+                    # Noise tweets during flooding
+                    tweet = self._generate_noise_tweet(extent, city_name)
+            else:
+                # No flooding: 90% normal/noise, 10% scattered flood mentions
+                is_flood_mention = random.random() < 0.1
+
+                if is_flood_mention:
+                    # Occasional false alarm or old flood reference
+                    tweet = self._generate_mild_flood_tweet(extent, city_name, is_genuine=False)
+                else:
+                    # Mix of normal tweets and noise
+                    is_normal = random.random() < 0.5
+                    if is_normal:
+                        tweet = self._generate_normal_tweet(extent, city_name)
+                    else:
+                        tweet = self._generate_noise_tweet(extent, city_name)
+
+            tweets.append(tweet)
+
+        return tweets
+
+    def _generate_flood_tweet(self, extent: List[float], flood_mask: np.ndarray,
+                              elev_array: np.ndarray, water_level: float,
+                              city_name: str, is_genuine: bool) -> Dict:
+        """Generate a flood-related tweet"""
         user_pool = self.genuine_users if is_genuine else self.noise_users
         user = random.choice(user_pool)
 
-        # Generate location within bounds
-        lat = random.uniform(extent[2], extent[3])
-        lon = random.uniform(extent[0], extent[1])
-
-        # Calculate flood severity
-        severity = self._get_flood_severity(lat, lon, extent, flood_mask, elev_array, water_level)
-
-        # For genuine users during flooding, bias towards flooded areas
-        if is_genuine and np.any(flood_mask) and random.random() < 0.7:
+        # For flood tweets, bias towards flooded areas
+        if np.any(flood_mask) and random.random() < 0.8:
             flooded_indices = np.where(flood_mask)
             if len(flooded_indices[0]) > 0:
                 idx = random.randint(0, len(flooded_indices[0]) - 1)
@@ -434,24 +491,25 @@ class FloodTweetGenerator:
                 # Convert back to lat/lon
                 lat = extent[3] - (lat_idx / flood_mask.shape[0]) * (extent[3] - extent[2])
                 lon = extent[0] + (lon_idx / flood_mask.shape[1]) * (extent[1] - extent[0])
+            else:
+                lat = random.uniform(extent[2], extent[3])
+                lon = random.uniform(extent[0], extent[1])
+        else:
+            lat = random.uniform(extent[2], extent[3])
+            lon = random.uniform(extent[0], extent[1])
 
-                # Recalculate severity
-                severity = self._get_flood_severity(lat, lon, extent, flood_mask, elev_array, water_level)
+        # Calculate severity
+        severity = self._get_flood_severity(lat, lon, extent, flood_mask, elev_array, water_level)
 
-        # Select tweet template based on severity
-        if not is_genuine:
-            template = random.choice(self.noise_tweets)
-        elif severity == 0.0:
-            template = random.choice(self.normal_tweets)
-        elif severity <= 0.4:
+        # Select appropriate template
+        if severity <= 0.4:
             template = random.choice(self.flood_tweets_mild)
         elif severity <= 0.7:
             template = random.choice(self.flood_tweets_moderate)
         else:
             template = random.choice(self.flood_tweets_severe)
 
-        # Fill in location information
-        streets = ["Main St", "Oak Ave", "First St", "Park Rd", "River Dr", "Hill St"]
+        streets = ["Main St", "Oak Ave", "First St", "Park Rd", "River Dr", "Hill St", "Center Ave", "Church St"]
         tweet_text = template.format(city=city_name, street=random.choice(streets))
 
         return {
@@ -465,8 +523,73 @@ class FloodTweetGenerator:
             'flood_severity': severity
         }
 
+    def _generate_normal_tweet(self, extent: List[float], city_name: str) -> Dict:
+        """Generate a normal non-flood tweet"""
+        user = random.choice(self.genuine_users)
+
+        lat = random.uniform(extent[2], extent[3])
+        lon = random.uniform(extent[0], extent[1])
+
+        template = random.choice(self.normal_tweets)
+        tweet_text = template.format(city=city_name)
+
+        return {
+            'user_id': user['user_id'],
+            'username': user['username'],
+            'lat': lat,
+            'lon': lon,
+            'text': tweet_text,
+            'timestamp': datetime.now().isoformat(),
+            'is_genuine': True,
+            'flood_severity': 0.0
+        }
+
+    def _generate_noise_tweet(self, extent: List[float], city_name: str) -> Dict:
+        """Generate a noise tweet"""
+        user = random.choice(self.noise_users)
+
+        lat = random.uniform(extent[2], extent[3])
+        lon = random.uniform(extent[0], extent[1])
+
+        template = random.choice(self.noise_tweets)
+        tweet_text = template.format(city=city_name) if '{city}' in template else template
+
+        return {
+            'user_id': user['user_id'],
+            'username': user['username'],
+            'lat': lat,
+            'lon': lon,
+            'text': tweet_text,
+            'timestamp': datetime.now().isoformat(),
+            'is_genuine': False,
+            'flood_severity': 0.0
+        }
+
+    def _generate_mild_flood_tweet(self, extent: List[float], city_name: str, is_genuine: bool) -> Dict:
+        """Generate a mild flood reference tweet"""
+        user_pool = self.genuine_users if is_genuine else self.noise_users
+        user = random.choice(user_pool)
+
+        lat = random.uniform(extent[2], extent[3])
+        lon = random.uniform(extent[0], extent[1])
+
+        template = random.choice(self.flood_tweets_mild)
+        streets = ["Main St", "Oak Ave", "First St", "Park Rd", "River Dr", "Hill St"]
+        tweet_text = template.format(city=city_name, street=random.choice(streets))
+
+        return {
+            'user_id': user['user_id'],
+            'username': user['username'],
+            'lat': lat,
+            'lon': lon,
+            'text': tweet_text,
+            'timestamp': datetime.now().isoformat(),
+            'is_genuine': is_genuine,
+            'flood_severity': 0.3
+        }
+
     def add_tweet_to_stream(self, tweet: Dict):
-        """Add tweet to Redis stream or session state"""
+        """Add tweet to Redis stream only (no local storage)"""
         if self.redis_connected:
             try:
                 tweet_data = {k: str(v) for k, v in tweet.items()}
@@ -476,41 +599,37 @@ class FloodTweetGenerator:
                 st.error(f"Redis error: {e}")
                 return False
         else:
-            # Fallback to session state
-            if 'tweets' not in st.session_state:
-                st.session_state.tweets = []
-            st.session_state.tweets.append(tweet)
-            # Keep only last 100 tweets
-            st.session_state.tweets = st.session_state.tweets[-100:]
-            return True
+            # If Redis not connected, silently drop tweets (no local storage)
+            return False
 
-    def get_recent_tweets(self, count: int = 20) -> List[Dict]:
-        """Get recent tweets from Redis or session state"""
+    def get_stream_stats(self) -> Dict:
+        """Get Redis stream statistics without reading tweet content"""
         if self.redis_connected:
             try:
-                messages = self.redis_client.xrevrange(self.stream_name, count=count)
-                tweets = []
-                for message_id, fields in messages:
-                    tweet = {
-                        'username': fields.get('username', ''),
-                        'lat': float(fields.get('lat', 0)),
-                        'lon': float(fields.get('lon', 0)),
-                        'text': fields.get('text', ''),
-                        'timestamp': fields.get('timestamp', ''),
-                        'is_genuine': fields.get('is_genuine', 'False') == 'True',
-                        'flood_severity': float(fields.get('flood_severity', 0))
-                    }
-                    tweets.append(tweet)
-                return tweets
+                stream_info = self.redis_client.xinfo_stream(self.stream_name)
+                return {
+                    'total_messages': stream_info['length'],
+                    'first_entry_id': stream_info.get('first-entry', 'N/A'),
+                    'last_entry_id': stream_info.get('last-generated-id', 'N/A'),
+                    'connected': True
+                }
             except Exception:
-                return []
+                return {
+                    'total_messages': 0,
+                    'first_entry_id': 'N/A',
+                    'last_entry_id': 'N/A',
+                    'connected': False
+                }
         else:
-            # Fallback to session state
-            tweets = st.session_state.get('tweets', [])
-            return tweets[-count:] if tweets else []
+            return {
+                'total_messages': 0,
+                'first_entry_id': 'N/A',
+                'last_entry_id': 'N/A',
+                'connected': False
+            }
 
     def clear_stream(self):
-        """Clear all tweets"""
+        """Clear all tweets from Redis stream"""
         if self.redis_connected:
             try:
                 self.redis_client.delete(self.stream_name)
@@ -518,8 +637,7 @@ class FloodTweetGenerator:
             except Exception:
                 return False
         else:
-            st.session_state.tweets = []
-            return True
+            return False
 
 # -------------------------------
 # Streamlit Setup
@@ -541,42 +659,23 @@ if 'flood_manager' not in st.session_state:
 st.sidebar.header("🌊 Flood Simulation Settings")
 place = st.sidebar.text_input("Enter US Location", "Dallas, Texas, USA")
 water_level = st.sidebar.slider("Global Water Level (m above sea level)", 0, 300, 100)
-show_rivers = st.sidebar.checkbox("Overlay Rivers", True)
-show_buildings = st.sidebar.checkbox("Overlay Buildings", False)
 
-# Interactive flooding controls
-st.sidebar.header("🎯 Interactive Flooding")
+# Map display settings
+st.sidebar.header("🗺️ Map Display")
 use_interactive_map = st.sidebar.checkbox("Enable Interactive Map", True)
-if st.sidebar.button("🗑️ Clear All Local Floods"):
-    st.session_state.flood_manager.clear_all_floods()
-    st.sidebar.success("Local floods cleared!")
-
-# Show active flood events
-if st.session_state.flood_manager.flood_events:
-    st.sidebar.write("**Active Local Floods:**")
-    for event in st.session_state.flood_manager.flood_events:
-        col_a, col_b = st.sidebar.columns([3, 1])
-        with col_a:
-            st.sidebar.caption(f"{event['id']}: {event['water_level']}m at ({event['lat']:.3f}, {event['lon']:.3f})")
-        with col_b:
-            if st.sidebar.button("❌", key=f"remove_{event['id']}"):
-                st.session_state.flood_manager.remove_flood_event(event['id'])
-                st.rerun()
 
 st.sidebar.header("📡 Sensor Network Settings")
-show_sensors = st.sidebar.checkbox("Show Sensors", True)
-num_sensors = st.sidebar.slider("Number of Sensors", 5, 50, 20)
+show_sensors = st.sidebar.checkbox("Show Water Level Sensors", True)
+num_sensors = st.sidebar.slider("Number of Water Level Sensors", 5, 50, 20)
 sensor_size = st.sidebar.slider("Sensor Icon Size", 50, 300, 100)
-stream_sensors = st.sidebar.checkbox("Stream Sensor Data to Redis", True)
-sensor_stream_interval = st.sidebar.slider("Sensor Stream Interval (seconds)", 5, 60, 10)
 
 st.sidebar.header("🐦 Tweet Stream Settings")
-tweet_enabled = st.sidebar.checkbox("Enable Tweet Stream", True)
-tweet_rate = st.sidebar.slider("Tweets per minute", 1, 30, 10)
+tweet_enabled = st.sidebar.checkbox("Enable Continuous Tweet Streaming", True)
+tweet_rate = st.sidebar.slider("Tweets per minute", 5, 120, 30)
 
-if st.sidebar.button("🗑️ Clear All Tweets"):
+if st.sidebar.button("🗑️ Clear Tweet Stream"):
     st.session_state.tweet_generator.clear_stream()
-    st.sidebar.success("Tweets cleared!")
+    st.sidebar.success("Tweet stream cleared!")
 
 # -------------------------------
 # Get bounding box
@@ -584,9 +683,6 @@ try:
     place_gdf = ox.geocode_to_gdf(place)
     place_geom = place_gdf.geometry[0]
     bounds = place_geom.bounds
-
-    osm_bbox = (bounds[3], bounds[1], bounds[2], bounds[0])
-    py3dep_bbox = (bounds[1], bounds[0], bounds[3], bounds[2])
 
     st.success(f"📍 Location: {place}")
 
@@ -633,7 +729,7 @@ with st.spinner("Downloading elevation data..."):
         elif nan_count > 0:
             elev_array = np.where(np.isnan(elev_array), np.nanmean(elev_array), elev_array)
 
-        # Store in session state for tweet generation
+        # Store in session state
         st.session_state.elev_array = elev_array
         st.session_state.extent = extent
         st.session_state.water_level = water_level
@@ -645,20 +741,14 @@ with st.spinner("Downloading elevation data..."):
         st.stop()
 
 # -------------------------------
-# Flood Simulation (with local floods)
-# Use combined flood mask that includes both global and local flooding
-combined_flood_mask = st.session_state.flood_manager.calculate_combined_flood_mask(
-    extent, elev_array, water_level
-)
-flooded_area_pct = (np.sum(combined_flood_mask) / combined_flood_mask.size) * 100
+# Flood Simulation (global only - no local floods)
+global_flood_mask = elev_array <= water_level
+flooded_area_pct = (np.sum(global_flood_mask) / global_flood_mask.size) * 100
 
-# Store both masks in session state
-st.session_state.flood_mask = combined_flood_mask
-st.session_state.global_flood_mask = elev_array <= water_level
+# Store flood mask in session state
+st.session_state.flood_mask = global_flood_mask
 
-st.info(f"💧 Total flooded area: {flooded_area_pct:.1f}% of the region")
-if st.session_state.flood_manager.flood_events:
-    st.info(f"🎯 Active local flood events: {len(st.session_state.flood_manager.flood_events)}")
+st.info(f"💧 Flooded area: {flooded_area_pct:.1f}% of the region")
 
 # -------------------------------
 # Deploy and update sensors
@@ -667,55 +757,41 @@ if show_sensors:
     if not hasattr(st.session_state.sensor_network, 'sensors') or len(st.session_state.sensor_network.sensors) != num_sensors:
         st.session_state.sensor_network.num_sensors = num_sensors
         sensors = st.session_state.sensor_network.deploy_sensors(extent, elev_array)
-        st.success(f"📡 Deployed {len(sensors)} sensors across the area")
+        st.success(f"📡 Deployed {len(sensors)} water level sensors across the area")
 
-    # Update sensor readings based on current flood conditions (use combined mask)
-    sensors = st.session_state.sensor_network.update_sensor_readings(extent, combined_flood_mask, elev_array, water_level)
+    # Update sensor readings based on current flood conditions
+    sensors = st.session_state.sensor_network.update_sensor_readings(extent, global_flood_mask, elev_array, water_level)
     sensor_summary = st.session_state.sensor_network.get_sensor_summary()
 
-    # Start sensor data streaming to Redis if enabled
-    if stream_sensors and st.session_state.tweet_generator.redis_connected:
-        # Initialize streaming counter
-        if 'sensor_stream_counter' not in st.session_state:
-            st.session_state.sensor_stream_counter = 0
-
-        # Stream sensor data every interval
-        st.session_state.sensor_stream_counter += 1
-        if st.session_state.sensor_stream_counter % max(1, sensor_stream_interval // 3) == 0:
-            success = st.session_state.sensor_network.add_sensor_data_to_stream(
-                st.session_state.tweet_generator.redis_client,
-                "sensor_data"
-            )
-            if success:
-                st.sidebar.success(f"📡 Sensor data streamed at {datetime.now().strftime('%H:%M:%S')}")
+    # Stream sensor data to Redis every 10 seconds
+    if st.session_state.tweet_generator.redis_connected:
+        success = st.session_state.sensor_network.add_sensor_data_to_stream(
+            st.session_state.tweet_generator.redis_client,
+            "sensor_data"
+        )
 
 else:
     sensors = []
     sensor_summary = {}
 
 # -------------------------------
-# Create layout with interactive map, sensors, and tweets
-col1, col2, col3 = st.columns([3, 1, 1])
+# Create layout with interactive map and minimal status
+col1, col2 = st.columns([4, 1])
 
 with col1:
-    st.subheader("🗺️ Interactive Flood Simulation Map")
+    st.subheader("🗺️ Flood Simulation Map with Sensor Network")
 
     if use_interactive_map:
         # Create interactive Plotly map
         with st.spinner("Creating interactive map..."):
             try:
-                # Create the base elevation map
                 fig = go.Figure()
 
                 # Create custom terrain-like colorscale
                 terrain_colorscale = [
-                    [0.0, '#0066cc'],    # Deep water (blue)
-                    [0.1, '#004499'],    # Shallow water (dark blue)
-                    [0.2, '#66cc99'],    # Low elevation (green)
-                    [0.4, '#99cc66'],    # Medium-low elevation (light green)
-                    [0.6, '#cccc33'],    # Medium elevation (yellow)
-                    [0.8, '#cc9933'],    # High elevation (orange)
-                    [1.0, '#996633']     # Very high elevation (brown)
+                    [0.0, '#0066cc'],    [0.1, '#004499'],    [0.2, '#66cc99'],
+                    [0.4, '#99cc66'],    [0.6, '#cccc33'],    [0.8, '#cc9933'],
+                    [1.0, '#996633']
                 ]
 
                 # Add elevation heatmap
@@ -723,16 +799,15 @@ with col1:
                     z=elev_array,
                     x=np.linspace(extent[0], extent[1], elev_array.shape[1]),
                     y=np.linspace(extent[2], extent[3], elev_array.shape[0]),
-                    colorscale=terrain_colorscale,  # Use custom terrain colorscale
+                    colorscale=terrain_colorscale,
                     opacity=0.8,
                     name='Elevation',
                     colorbar=dict(title="Elevation (m)", x=1.02)
                 ))
 
                 # Add flood overlay if there's flooding
-                if np.any(combined_flood_mask):
-                    # Create flood overlay
-                    flood_overlay = np.where(combined_flood_mask, 1, np.nan)
+                if np.any(global_flood_mask):
+                    flood_overlay = np.where(global_flood_mask, 1, np.nan)
                     fig.add_trace(go.Heatmap(
                         z=flood_overlay,
                         x=np.linspace(extent[0], extent[1], elev_array.shape[1]),
@@ -767,37 +842,18 @@ with col1:
                                     'square' if alert_level == 'caution' else
                                     'triangle-up' if alert_level == 'warning' else 'x'
                                 ),
-                                name=f'{alert_level.title()} Sensors ({len(level_sensors)})',
+                                name=f'{alert_level.title()} Water Level Sensors ({len(level_sensors)})',
                                 text=[f"{s['id']}<br>Type: {s['type']}<br>Reading: {s['current_reading']:.2f}<br>Status: {s['status']}"
                                       for s in level_sensors],
                                 hovertemplate='%{text}<extra></extra>'
                             ))
 
-                # Add local flood event markers
-                if st.session_state.flood_manager.flood_events:
-                    flood_events = st.session_state.flood_manager.flood_events
-                    fig.add_trace(go.Scatter(
-                        x=[event['lon'] for event in flood_events],
-                        y=[event['lat'] for event in flood_events],
-                        mode='markers',
-                        marker=dict(
-                            size=20,
-                            color='red',
-                            symbol='circle-open',
-                            line=dict(width=4, color='red')
-                        ),
-                        name='Local Flood Events',
-                        text=[f"{event['id']}<br>Water Level: {event['water_level']}m<br>Radius: {event['radius_km']}km"
-                              for event in flood_events],
-                        hovertemplate='%{text}<extra></extra>'
-                    ))
-
                 # Configure layout
                 fig.update_layout(
-                    title=f"Interactive Flood Map: {place}<br>Global Water Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%",
+                    title=f"Flood Map: {place}<br>Water Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%",
                     xaxis_title="Longitude (°)",
                     yaxis_title="Latitude (°)",
-                    height=600,
+                    height=700,
                     showlegend=True,
                     legend=dict(x=0, y=1, bgcolor='rgba(255,255,255,0.8)'),
                     hovermode='closest'
@@ -806,52 +862,11 @@ with col1:
                 # Equal aspect ratio
                 fig.update_yaxes(scaleanchor="x", scaleratio=1)
 
-                # Display the interactive map
-                selected_points = st.plotly_chart(fig, use_container_width=True, key="flood_map")
-
-                # Instructions for interaction
-                st.info("💡 **Instructions**: The map above shows real-time flood conditions. Use the controls below to add localized flooding.")
-
-                # Local flood creation interface
-                st.write("### 🎯 Create Local Flood Event")
-                col_flood1, col_flood2, col_flood3 = st.columns(3)
-
-                with col_flood1:
-                    local_lat = st.number_input("Latitude",
-                                                min_value=extent[2],
-                                                max_value=extent[3],
-                                                value=(extent[2] + extent[3])/2,
-                                                step=0.001,
-                                                format="%.6f")
-                with col_flood2:
-                    local_lon = st.number_input("Longitude",
-                                                min_value=extent[0],
-                                                max_value=extent[1],
-                                                value=(extent[0] + extent[1])/2,
-                                                step=0.001,
-                                                format="%.6f")
-                with col_flood3:
-                    local_water_level = st.number_input("Local Water Level (m)",
-                                                        min_value=0,
-                                                        max_value=500,
-                                                        value=water_level + 10,
-                                                        step=1)
-
-                col_flood4, col_flood5 = st.columns(2)
-                with col_flood4:
-                    flood_radius = st.slider("Flood Radius (km)", 0.5, 10.0, 2.0, 0.5)
-                with col_flood5:
-                    if st.button("🌊 Create Local Flood", type="primary"):
-                        event = st.session_state.flood_manager.add_flood_event(
-                            local_lat, local_lon, local_water_level, flood_radius
-                        )
-                        st.success(f"Created flood event {event['id']} at ({local_lat:.3f}, {local_lon:.3f})")
-                        st.rerun()
+                # Display the interactive map (read-only)
+                st.plotly_chart(fig, use_container_width=True, key="flood_map")
 
             except Exception as e:
                 st.error(f"Interactive map error: {e}")
-                # Fallback to matplotlib
-                st.info("Falling back to static map...")
                 use_interactive_map = False
 
     # Fallback static map (matplotlib)
@@ -865,13 +880,12 @@ with col1:
                 fig.colorbar(elev_img, ax=ax, label="Elevation (m)", shrink=0.8)
 
                 # Plot flood overlay
-                if np.any(combined_flood_mask):
-                    flood_overlay = np.ma.masked_where(~combined_flood_mask, np.ones_like(combined_flood_mask))
+                if np.any(global_flood_mask):
+                    flood_overlay = np.ma.masked_where(~global_flood_mask, np.ones_like(global_flood_mask))
                     ax.imshow(flood_overlay, cmap='Blues', alpha=0.6, extent=extent, origin='upper')
 
-                # Plot sensors on the map with enhanced visibility
+                # Plot sensors if enabled
                 if show_sensors and sensors:
-                    # Group sensors by alert level for better plotting
                     sensor_groups = {
                         'normal': [],
                         'caution': [],
@@ -882,7 +896,6 @@ with col1:
                     for sensor in sensors:
                         sensor_groups[sensor['alert_level']].append(sensor)
 
-                    # Plot each group with different styles
                     group_styles = {
                         'normal': {'color': 'green', 'marker': 'o', 'size_mult': 0.8, 'label': 'Normal'},
                         'caution': {'color': 'yellow', 'marker': 's', 'size_mult': 1.0, 'label': 'Caution'},
@@ -904,53 +917,13 @@ with col1:
                                        edgecolors='black',
                                        linewidth=2,
                                        label=f"{style['label']} ({len(group_sensors)})",
-                                       zorder=10)  # Ensure sensors appear on top
+                                       zorder=10)
 
-                    # Add sensor IDs as text labels for critical sensors
-                    critical_sensors = [s for s in sensors if s['alert_level'] == 'critical']
-                    for sensor in critical_sensors:
-                        ax.annotate(sensor['id'][-3:],
-                                    (sensor['lon'], sensor['lat']),
-                                    xytext=(5, 5),
-                                    textcoords='offset points',
-                                    fontsize=8,
-                                    color='white',
-                                    weight='bold',
-                                    bbox=dict(boxstyle='round,pad=0.2', facecolor='red', alpha=0.7))
-
-                # Plot local flood events
-                if st.session_state.flood_manager.flood_events:
-                    for event in st.session_state.flood_manager.flood_events:
-                        # Draw flood event center
-                        ax.scatter(event['lon'], event['lat'],
-                                   s=300, c='red', marker='*',
-                                   edgecolors='darkred', linewidth=3,
-                                   label='Local Floods' if event == st.session_state.flood_manager.flood_events[0] else "",
-                                   zorder=15)
-
-                        # Draw radius circle
-                        radius_deg = event['radius_km'] / 111.0
-                        circle = plt.Circle((event['lon'], event['lat']), radius_deg,
-                                            fill=False, color='red', linewidth=2, linestyle='--', alpha=0.7)
-                        ax.add_patch(circle)
-
-                        # Add label
-                        ax.annotate(f"{event['id']}\n{event['water_level']}m",
-                                    (event['lon'], event['lat']),
-                                    xytext=(10, 10),
-                                    textcoords='offset points',
-                                    fontsize=9,
-                                    color='darkred',
-                                    weight='bold',
-                                    bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.8))
-
-                # Add coordinate system
                 ax.set_xlabel("Longitude (°)")
                 ax.set_ylabel("Latitude (°)")
-                ax.set_title(f"Flood Simulation: {place}\nGlobal Level: {water_level}m | Total Flooded: {flooded_area_pct:.1f}%")
+                ax.set_title(f"Flood Simulation: {place}\nWater Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%")
                 ax.grid(True, alpha=0.3)
 
-                # Add legend for sensors if shown
                 if show_sensors and sensors:
                     ax.legend(loc='upper left', title='Sensor Status', frameon=True, fancybox=True, shadow=True)
 
@@ -961,135 +934,70 @@ with col1:
                 st.error(f"Map rendering error: {e}")
 
 with col2:
-    st.subheader("📡 Sensor Network Status")
+    st.subheader("📊 Streaming Status")
 
+    # Redis connection status
+    if st.session_state.tweet_generator.redis_connected:
+        st.success("🟢 Redis Connected")
+    else:
+        st.error("🔴 Redis Disconnected")
+        st.caption("Data streams disabled")
+
+    st.write("---")
+
+    # Sensor statistics
     if show_sensors and sensor_summary:
-        # Show streaming status
-        if stream_sensors:
-            if st.session_state.tweet_generator.redis_connected:
-                st.success("🔴 LIVE - Streaming to Redis")
-                st.caption(f"📡 Interval: {sensor_stream_interval}s")
-            else:
-                st.warning("⚠️ Redis not connected")
-        else:
-            st.info("📡 Streaming disabled")
-
-        # Sensor network overview
+        st.subheader("📡 Water Level Sensors")
         st.metric("Total Sensors", sensor_summary['total_sensors'])
+        st.metric("Critical Alerts", sensor_summary['critical_alerts'])
+        st.metric("Warning Alerts", sensor_summary['warning_alerts'])
+        st.metric("Operational", sensor_summary['operational'])
 
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            st.metric("Operational", sensor_summary['operational'])
-            st.metric("Critical", sensor_summary['critical_alerts'])
-        with col_s2:
-            st.metric("Offline", sensor_summary['offline'])
-            st.metric("Warning", sensor_summary['warning_alerts'])
+    st.write("---")
 
-        st.write("---")
-
-        # Show Redis stream info if connected
-        if stream_sensors and st.session_state.tweet_generator.redis_connected:
-            try:
-                stream_info = st.session_state.tweet_generator.redis_client.xinfo_stream("sensor_data")
-                st.caption(f"📊 Stream length: {stream_info['length']} messages")
-            except:
-                st.caption("📊 Starting sensor stream...")
-
-        # Live sensor readings
-        st.subheader("🔴 Critical Alerts")
-        critical_sensors = [s for s in sensors if s['alert_level'] == 'critical']
-        if critical_sensors:
-            for sensor in critical_sensors:
-                st.error(f"🚨 **{sensor['id']}** ({sensor['type']})\n"
-                         f"Reading: {sensor['current_reading']:.2f}\n"
-                         f"Depth: {sensor.get('water_depth', 0):.1f}m")
-        else:
-            st.success("No critical alerts")
-
-        st.subheader("🟡 Warning Sensors")
-        warning_sensors = [s for s in sensors if s['alert_level'] == 'warning']
-        if warning_sensors:
-            for sensor in warning_sensors[:3]:  # Show top 3
-                st.warning(f"⚠️ **{sensor['id']}** ({sensor['type']})\n"
-                           f"Reading: {sensor['current_reading']:.2f}\n"
-                           f"Depth: {sensor.get('water_depth', 0):.1f}m")
-        else:
-            st.info("No warnings")
-
-        # Refresh button for sensors
-        if st.button("🔄 Update Sensors", key="sensor_refresh"):
-            st.session_state.sensor_network.update_sensor_readings(extent, combined_flood_mask, elev_array, water_level)
-            # Force a sensor data stream update
-            if stream_sensors and st.session_state.tweet_generator.redis_connected:
-                st.session_state.sensor_network.add_sensor_data_to_stream(
-                    st.session_state.tweet_generator.redis_client,
-                    "sensor_data"
-                )
-                st.success("📡 Sensor data streamed!")
-            st.rerun()
-
-    else:
-        st.info("Sensor network disabled. Enable in sidebar to see sensor data.")
-
-with col3:
-    st.subheader("🐦 Live Tweet Feed")
-
-    # Generate tweets if enabled (use combined flood mask)
+    # Tweet stream statistics (without showing content)
     if tweet_enabled:
-        city_name = place.split(',')[0]
-        for _ in range(random.randint(1, 2)):
-            tweet = st.session_state.tweet_generator.generate_tweet(
-                extent, combined_flood_mask, elev_array, water_level, city_name
+        st.subheader("🐦 Continuous Tweet Stream")
+        tweet_stats = st.session_state.tweet_generator.get_stream_stats()
+
+        if tweet_stats['connected']:
+            st.metric("Total Tweets", tweet_stats['total_messages'])
+            st.metric("Rate (per min)", tweet_rate)
+            flooding_pct = (np.sum(global_flood_mask) / global_flood_mask.size) * 100
+            if flooding_pct > 1:
+                st.caption("🌊 Flood mode: More flood tweets")
+            else:
+                st.caption("☀️ Normal mode: Mixed content")
+        else:
+            st.error("Stream not available")
+
+    # Manual refresh button
+    if st.button("🔄 Force Update", type="primary"):
+        if show_sensors and st.session_state.tweet_generator.redis_connected:
+            st.session_state.sensor_network.add_sensor_data_to_stream(
+                st.session_state.tweet_generator.redis_client,
+                "sensor_data"
             )
-            st.session_state.tweet_generator.add_tweet_to_stream(tweet)
-
-    if tweet_enabled:
-        # Tweet stream status
-        if st.session_state.tweet_generator.redis_connected:
-            st.success("🟢 Redis Connected")
-        else:
-            st.info("🟡 Using Local Storage")
-
-        # Get and display recent tweets
-        recent_tweets = st.session_state.tweet_generator.get_recent_tweets(10)
-
-        if recent_tweets:
-            # Calculate statistics
-            genuine_count = sum(1 for t in recent_tweets if t['is_genuine'])
-            noise_count = len(recent_tweets) - genuine_count
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.metric("Genuine", genuine_count)
-            with col_b:
-                st.metric("Noise", noise_count)
-
-            st.write("---")
-
-            # Display tweets with color coding (compact version)
-            for tweet in reversed(recent_tweets[-8:]):  # Show latest 8
-                timestamp = tweet['timestamp'][:16] if isinstance(tweet['timestamp'], str) else str(tweet['timestamp'])[:16]
-
-                if tweet['is_genuine']:
-                    if tweet['flood_severity'] > 0.7:
-                        st.error(f"🆘 @{tweet['username'][:10]}\n{tweet['text'][:50]}...")
-                    elif tweet['flood_severity'] > 0.4:
-                        st.warning(f"⚠️ @{tweet['username'][:10]}\n{tweet['text'][:50]}...")
-                    elif tweet['flood_severity'] > 0:
-                        st.info(f"🌧️ @{tweet['username'][:10]}\n{tweet['text'][:50]}...")
-                    else:
-                        st.success(f"☀️ @{tweet['username'][:10]}\n{tweet['text'][:50]}...")
-                else:
-                    st.write(f"📱 @{tweet['username'][:10]}\n{tweet['text'][:50]}...")
-
-        else:
-            st.info("No tweets yet!")
-    else:
-        st.info("Tweet stream disabled.")
+        st.rerun()
 
 # -------------------------------
-# Bottom statistics
-st.subheader("📊 Comprehensive Simulation Dashboard")
+# Background data generation - Continuous streaming
+if st.session_state.tweet_generator.redis_connected:
+    city_name = place.split(',')[0]
+
+    # Generate continuous tweets
+    if tweet_enabled:
+        new_tweets = st.session_state.tweet_generator.generate_continuous_tweets(
+            extent, global_flood_mask, elev_array, water_level, city_name, tweet_rate
+        )
+
+        # Stream all generated tweets to Redis
+        for tweet in new_tweets:
+            st.session_state.tweet_generator.add_tweet_to_stream(tweet)
+
+# -------------------------------
+# Bottom statistics dashboard
+st.subheader("📊 Simulation Dashboard")
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 with col1:
@@ -1099,53 +1007,38 @@ with col2:
 with col3:
     st.metric("Elevation Range", f"{np.nanmin(elev_array):.0f}m - {np.nanmax(elev_array):.0f}m")
 with col4:
-    tweets_count = len(st.session_state.tweet_generator.get_recent_tweets(100))
-    st.metric("Total Tweets", tweets_count)
+    if tweet_enabled and st.session_state.tweet_generator.redis_connected:
+        tweet_stats = st.session_state.tweet_generator.get_stream_stats()
+        st.metric("Tweets Streamed", tweet_stats['total_messages'])
+    else:
+        st.metric("Tweets Streamed", "Disabled")
 with col5:
     if show_sensors and sensor_summary:
         st.metric("Active Sensors", sensor_summary['operational'])
     else:
         st.metric("Active Sensors", "0")
 with col6:
-    st.metric("Local Flood Events", len(st.session_state.flood_manager.flood_events))
+    st.metric("Water Level Sensors", f"{len(sensors) if sensors else 0} sensors")
 
-# Local flood events summary
-if st.session_state.flood_manager.flood_events:
-    st.subheader("🎯 Local Flood Events Summary")
-
-    flood_data = []
-    for event in st.session_state.flood_manager.flood_events:
-        flood_data.append({
-            'Event ID': event['id'],
-            'Location': f"{event['lat']:.4f}, {event['lon']:.4f}",
-            'Water Level (m)': f"{event['water_level']:.1f}",
-            'Radius (km)': f"{event['radius_km']:.1f}",
-            'Created': event['created_at'].strftime('%H:%M:%S'),
-            'Status': 'Active' if event['active'] else 'Inactive'
-        })
-
-    flood_df = pd.DataFrame(flood_data)
-    st.dataframe(flood_df, use_container_width=True)
-
-# Detailed sensor data table
+# Detailed sensor data table (if sensors enabled)
 if show_sensors and sensors:
-    st.subheader("📋 Detailed Sensor Readings")
+    st.subheader("📋 Water Level Sensor Network Details")
 
-    # Create a DataFrame for better display
+    # Create sensor DataFrame
     sensor_data = []
     for sensor in sensors:
         sensor_data.append({
             'ID': sensor['id'],
-            'Type': sensor['type'],
-            'Status': sensor['status'],
+            'Type': 'Water Level',
+            'Location': f"{sensor['lat']:.4f}, {sensor['lon']:.4f}",
+            'Elevation': f"{sensor['elevation']:.1f}m",
+            'Water Level Reading': f"{sensor['current_reading']:.2f}m",
+            'Water Depth': f"{sensor.get('water_depth', 0):.1f}m",
             'Alert Level': sensor['alert_level'],
-            'Current Reading': f"{sensor['current_reading']:.2f}",
-            'Water Depth (m)': f"{sensor.get('water_depth', 0):.1f}",
-            'Elevation (m)': f"{sensor['elevation']:.1f}",
-            'Location': f"{sensor['lat']:.4f}, {sensor['lon']:.4f}"
+            'Status': sensor['status'],
+            'Last Update': sensor['last_update'].strftime('%H:%M:%S')
         })
 
-    # Display as table
     df = pd.DataFrame(sensor_data)
 
     # Color-code the table based on alert level
@@ -1162,25 +1055,19 @@ if show_sensors and sensors:
     styled_df = df.style.applymap(color_alert_level, subset=['Alert Level'])
     st.dataframe(styled_df, use_container_width=True, height=300)
 
+st.info("📡 **Sensor Data**: Water level sensors stream data to Redis every 10 seconds")
+st.info("🐦 **Tweet Data**: Continuous tweet generation based on flood conditions and city activity")
+
 st.warning("⚠️ This is a simplified flood simulation for educational purposes only. Real flood modeling requires additional factors like rainfall, drainage, soil permeability, and temporal dynamics.")
 
-# Simple auto-refresh mechanism for tweets
-if tweet_enabled:
+# Auto-refresh mechanism for continuous data streaming
+if tweet_enabled or show_sensors:
     # Initialize auto-refresh counter
     if 'auto_refresh_counter' not in st.session_state:
         st.session_state.auto_refresh_counter = 0
 
-    # Auto-generate tweets periodically
-    st.session_state.auto_refresh_counter += 1
-    if st.session_state.auto_refresh_counter % 5 == 0:  # Every 5th page interaction
-        city_name = place.split(',')[0]
-        tweet = st.session_state.tweet_generator.generate_tweet(
-            extent, combined_flood_mask, elev_array, water_level, city_name
-        )
-        st.session_state.tweet_generator.add_tweet_to_stream(tweet)
-
-    # Add an auto-refresh toggle in sidebar
-    auto_refresh = st.sidebar.checkbox("Auto-refresh tweets", value=True)
+    # Auto-refresh to maintain continuous streaming
+    auto_refresh = st.sidebar.checkbox("Auto-refresh for continuous streaming", value=True)
     if auto_refresh:
-        time.sleep(3)
+        time.sleep(1)  # Fast refresh for continuous streaming
         st.rerun()
