@@ -1,13 +1,15 @@
+# Add this at the very top to suppress urllib3 warnings
+import warnings
+import urllib3
+warnings.filterwarnings('ignore', message='urllib3 v2 only supports OpenSSL 1.1.1+')
+urllib3.disable_warnings(urllib3.exceptions.NotOpenSSLWarning)
+
 import streamlit as st
-import py3dep
-import osmnx as ox
-import geopandas as gpd
 import numpy as np
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from shapely.geometry import box
 import warnings
 import redis
 import json
@@ -20,9 +22,30 @@ from typing import List, Dict, Tuple
 import uuid
 import pandas as pd
 
-warnings.filterwarnings('ignore')
+# Optional imports with fallbacks
+try:
+    import py3dep
+    ELEVATION_AVAILABLE = True
+except ImportError:
+    ELEVATION_AVAILABLE = False
+    st.warning("py3dep not available - using synthetic elevation data")
 
-# Set matplotlib backend for Streamlit
+try:
+    import osmnx as ox
+    GEOCODING_AVAILABLE = True
+except ImportError:
+    GEOCODING_AVAILABLE = False
+    st.warning("osmnx not available - using default coordinates")
+
+try:
+    import geopandas as gpd
+    from shapely.geometry import box
+    GEO_AVAILABLE = True
+except ImportError:
+    GEO_AVAILABLE = False
+    st.warning("geopandas/shapely not available - using simple geometry")
+
+warnings.filterwarnings('ignore')
 plt.switch_backend('Agg')
 
 @dataclass
@@ -141,7 +164,9 @@ class FloodSensorNetwork:
                 'status': 'operational',
                 'last_update': datetime.now(),
                 'alert_level': 'normal',
-                'is_flooded': False
+                'is_flooded': False,
+                'battery_level': random.uniform(80, 100),
+                'signal_strength': random.uniform(70, 100)
             }
             sensors.append(sensor)
 
@@ -247,6 +272,8 @@ class FloodSensorNetwork:
                     'status': sensor['status'],
                     'alert_level': sensor['alert_level'],
                     'is_flooded': str(sensor['is_flooded']),
+                    'battery_level': str(sensor.get('battery_level', 100)),
+                    'signal_strength': str(sensor.get('signal_strength', 100)),
                     'timestamp': sensor['last_update'].isoformat()
                 }
 
@@ -293,11 +320,6 @@ class FloodTweetGenerator:
             "Weekend plans anyone? #weekend",
             "Local restaurant has amazing food! 🍕",
             "Enjoying the sunshine today",
-            "Perfect weather for outdoor activities in {city}",
-            "Morning jog complete! Feeling great 🏃‍♂️",
-            "Coffee shop in {city} has the best wifi",
-            "Another productive day at work",
-            "Looking forward to the weekend!"
         ]
 
         self.flood_tweets_mild = [
@@ -350,16 +372,6 @@ class FloodTweetGenerator:
             "Sports score update: Team wins 3-2! ⚽",
             "Fashion week highlights! So trendy! 👗",
             "Tech stocks are up today! 📈",
-            "Movie review: Latest blockbuster disappoints",
-            "Food trend alert: Everyone's trying this! 🥑",
-            "Stock market volatility continues 📊",
-            "New restaurant opening downtown!",
-            "Concert tickets on sale now! 🎶",
-            "Breaking: Local team wins championship!",
-            "Weather forecast looks good this week",
-            "New shopping mall opens next month",
-            "Local festival this weekend! 🎪",
-            "Best pizza in town at Mario's!"
         ]
 
         # Generate users
@@ -639,12 +651,131 @@ class FloodTweetGenerator:
         else:
             return False
 
+def get_location_bounds(place: str) -> Tuple[List[float], str]:
+    """Get location bounds with multiple fallback methods"""
+
+    # Predefined locations for common places
+    default_locations = {
+        "dallas": [32.7157, 32.8074, -96.8716, -96.7297],  # [lat_min, lat_max, lon_min, lon_max]
+        "houston": [29.5274, 29.9748, -95.8233, -95.0140],
+        "austin": [30.0986, 30.5081, -97.9383, -97.5675],
+        "san antonio": [29.2140, 29.6605, -98.7598, -98.2940],
+        "new york": [40.4774, 40.9176, -74.2591, -73.7004],
+        "los angeles": [33.7037, 34.3373, -118.6681, -118.1553],
+        "chicago": [41.6444, 42.0230, -87.9402, -87.5240],
+        "miami": [25.7617, 25.8557, -80.3148, -80.1918],
+        "seattle": [47.4810, 47.7341, -122.4594, -122.2244],
+        "denver": [39.6147, 39.9142, -105.1102, -104.8009]
+    }
+
+    place_key = place.lower().split(',')[0].strip()
+
+    if place_key in default_locations:
+        bounds = default_locations[place_key]
+        return bounds, place_key.title()
+
+    # Try geocoding if available
+    if GEOCODING_AVAILABLE:
+        try:
+            place_gdf = ox.geocode_to_gdf(place)
+            place_geom = place_gdf.geometry[0]
+            bounds_tuple = place_geom.bounds
+            bounds = [bounds_tuple[1], bounds_tuple[3], bounds_tuple[0], bounds_tuple[2]]  # Convert to [lat_min, lat_max, lon_min, lon_max]
+            return bounds, place
+        except Exception as e:
+            st.warning(f"Geocoding failed: {e}")
+
+    # Final fallback - use Dallas
+    st.warning(f"Using Dallas coordinates as fallback for '{place}'")
+    return default_locations["dallas"], "Dallas (fallback)"
+
+def create_synthetic_elevation(bounds: List[float], size: int = 100) -> Tuple[np.ndarray, List[float]]:
+    """Create synthetic elevation data"""
+    lat_min, lat_max, lon_min, lon_max = bounds
+
+    # Create coordinate arrays
+    lats = np.linspace(lat_min, lat_max, size)
+    lons = np.linspace(lon_min, lon_max, size)
+    lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+    # Create realistic elevation pattern
+    # Base elevation with some randomness
+    base_elevation = 100 + np.random.normal(0, 20, (size, size))
+
+    # Add some hills and valleys
+    center_lat, center_lon = (lat_min + lat_max) / 2, (lon_min + lon_max) / 2
+    distance_from_center = np.sqrt((lat_grid - center_lat)**2 + (lon_grid - center_lon)**2)
+
+    # Create elevation variations
+    hill_pattern = 50 * np.sin(distance_from_center * 20) * np.exp(-distance_from_center * 10)
+    valley_pattern = -30 * np.cos(lat_grid * 50) * np.cos(lon_grid * 50)
+
+    # Combine patterns
+    elevation = base_elevation + hill_pattern + valley_pattern
+
+    # Ensure reasonable elevation range (0-300m)
+    elevation = np.clip(elevation, 0, 300)
+
+    # Create extent
+    extent = [lon_min, lon_max, lat_min, lat_max]
+
+    return elevation, extent
+
+def get_elevation_data(place: str, bounds: List[float]) -> Tuple[np.ndarray, List[float]]:
+    """Get elevation data with multiple fallback methods"""
+
+    if ELEVATION_AVAILABLE:
+        try:
+            st.info("🌍 Attempting to download real elevation data...")
+
+            if GEO_AVAILABLE:
+                # Try with geometry
+                place_gdf = ox.geocode_to_gdf(place)
+                place_geom = place_gdf.geometry[0]
+                dem_data = py3dep.get_dem(geometry=place_geom, resolution=30, crs="EPSG:4326")
+            else:
+                # Try with bounding box
+                lat_min, lat_max, lon_min, lon_max = bounds
+                bbox = [lat_min, lon_min, lat_max, lon_max]  # py3dep format
+                dem_data = py3dep.get_dem(bbox, resolution=90)
+
+            elev_array = dem_data.values.squeeze() if hasattr(dem_data, 'values') else dem_data.squeeze()
+
+            if hasattr(dem_data, 'rio'):
+                dem_bounds = dem_data.rio.bounds()
+                extent = [dem_bounds[0], dem_bounds[2], dem_bounds[1], dem_bounds[3]]
+            else:
+                extent = [bounds[2], bounds[3], bounds[0], bounds[1]]  # Convert back to [lon_min, lon_max, lat_min, lat_max]
+
+            # Validate data
+            if elev_array is None or elev_array.size == 0:
+                raise ValueError("Empty elevation data")
+
+            nan_count = np.isnan(elev_array).sum()
+            if nan_count == elev_array.size:
+                raise ValueError("All elevation values are NaN")
+            elif nan_count > 0:
+                elev_array = np.where(np.isnan(elev_array), np.nanmean(elev_array), elev_array)
+
+            st.success("✅ Real elevation data downloaded successfully!")
+            return elev_array, extent
+
+        except Exception as e:
+            st.warning(f"⚠️ Real elevation data failed: {e}")
+            st.info("🔄 Falling back to synthetic elevation data...")
+
+    # Fallback to synthetic data
+    st.info("🎨 Creating synthetic elevation data...")
+    elevation, extent = create_synthetic_elevation(bounds)
+    st.success("✅ Synthetic elevation data created!")
+    return elevation, extent
+
 # -------------------------------
 # Streamlit Setup
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Flood Simulation", page_icon="🌊")
 st.title("🌊 Interactive Flood Simulation with Real-Time Data Streaming")
 
-# Initialize tweet generator, sensor network, and flood manager
+# Initialize components in session state
 if 'tweet_generator' not in st.session_state:
     st.session_state.tweet_generator = FloodTweetGenerator()
 
@@ -657,7 +788,7 @@ if 'flood_manager' not in st.session_state:
 # -------------------------------
 # User Inputs
 st.sidebar.header("🌊 Flood Simulation Settings")
-place = st.sidebar.text_input("Enter US Location", "Dallas, Texas, USA")
+place = st.sidebar.text_input("Enter Location", "Dallas, Texas, USA")
 water_level = st.sidebar.slider("Global Water Level (m above sea level)", 0, 300, 100)
 
 # Map display settings
@@ -677,105 +808,88 @@ if st.sidebar.button("🗑️ Clear Tweet Stream"):
     st.session_state.tweet_generator.clear_stream()
     st.sidebar.success("Tweet stream cleared!")
 
-# -------------------------------
-# Get bounding box
-try:
-    place_gdf = ox.geocode_to_gdf(place)
-    place_geom = place_gdf.geometry[0]
-    bounds = place_geom.bounds
+# Force refresh button in sidebar
+if st.sidebar.button("🔄 Force Refresh", type="primary"):
+    st.rerun()
 
-    st.success(f"📍 Location: {place}")
+# -------------------------------
+# Get location bounds and elevation data
+try:
+    # Get location bounds
+    with st.spinner(f"📍 Looking up location: {place}..."):
+        bounds, resolved_place = get_location_bounds(place)
+        st.success(f"📍 Location resolved: {resolved_place}")
+
+    # Get elevation data with progress indicator
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    status_text.text("🌍 Fetching elevation data...")
+    progress_bar.progress(25)
+
+    elev_array, extent = get_elevation_data(place, bounds)
+
+    progress_bar.progress(75)
+    status_text.text("✅ Processing elevation data...")
 
     # Store in session state
-    st.session_state.place = place
+    st.session_state.place = resolved_place
     st.session_state.bounds = bounds
+    st.session_state.elev_array = elev_array
+    st.session_state.extent = extent
+    st.session_state.water_level = water_level
+
+    progress_bar.progress(100)
+    status_text.text("✅ Elevation data ready!")
+
+    # Clear progress indicators
+    time.sleep(0.5)
+    progress_bar.empty()
+    status_text.empty()
+
+    st.info(f"📊 Elevation range: {np.nanmin(elev_array):.1f}m to {np.nanmax(elev_array):.1f}m")
 
 except Exception as e:
-    st.error(f"Location not found: {e}")
+    st.error(f"❌ Critical error loading data: {e}")
+    st.info("💡 Try using a simpler location name like 'Dallas' or 'Houston'")
     st.stop()
 
 # -------------------------------
-# Fetch elevation data
-with st.spinner("Downloading elevation data..."):
-    try:
-        st.info("Downloading elevation data...")
-
-        try:
-            dem_data = py3dep.get_dem(geometry=place_geom, resolution=30, crs="EPSG:4326")
-            elev_array = dem_data.values.squeeze()
-            dem_bounds = dem_data.rio.bounds()
-            extent = [dem_bounds[0], dem_bounds[2], dem_bounds[1], dem_bounds[3]]
-            st.success("✅ Elevation data downloaded")
-        except Exception as e1:
-            try:
-                bbox_simple = [bounds[1], bounds[0], bounds[3], bounds[2]]
-                dem_data = py3dep.get_dem(bbox_simple, resolution=90)
-                elev_array = dem_data.squeeze()
-                extent = [bounds[0], bounds[2], bounds[1], bounds[3]]
-                st.success("✅ Elevation data downloaded (fallback method)")
-            except Exception as e2:
-                st.error(f"All elevation methods failed: {e1}, {e2}")
-                st.stop()
-
-        # Validate and clean data
-        if elev_array is None or elev_array.size == 0:
-            st.error("No elevation data available")
-            st.stop()
-
-        nan_count = np.isnan(elev_array).sum()
-        if nan_count == elev_array.size:
-            st.error("All elevation values are invalid")
-            st.stop()
-        elif nan_count > 0:
-            elev_array = np.where(np.isnan(elev_array), np.nanmean(elev_array), elev_array)
-
-        # Store in session state
-        st.session_state.elev_array = elev_array
-        st.session_state.extent = extent
-        st.session_state.water_level = water_level
-
-        st.info(f"Elevation range: {np.nanmin(elev_array):.1f}m to {np.nanmax(elev_array):.1f}m")
-
-    except Exception as e:
-        st.error(f"Critical error: {e}")
-        st.stop()
-
-# -------------------------------
-# Flood Simulation (global only - no local floods)
+# Flood Simulation
 global_flood_mask = elev_array <= water_level
 flooded_area_pct = (np.sum(global_flood_mask) / global_flood_mask.size) * 100
 
 # Store flood mask in session state
 st.session_state.flood_mask = global_flood_mask
 
-st.info(f"💧 Flooded area: {flooded_area_pct:.1f}% of the region")
+st.success(f"💧 Simulation ready! Flooded area: {flooded_area_pct:.1f}% of the region")
 
 # -------------------------------
 # Deploy and update sensors
 if show_sensors:
     # Deploy sensors if not already deployed or if number changed
     if not hasattr(st.session_state.sensor_network, 'sensors') or len(st.session_state.sensor_network.sensors) != num_sensors:
-        st.session_state.sensor_network.num_sensors = num_sensors
-        sensors = st.session_state.sensor_network.deploy_sensors(extent, elev_array)
-        st.success(f"📡 Deployed {len(sensors)} water level sensors across the area")
+        with st.spinner("📡 Deploying sensor network..."):
+            st.session_state.sensor_network.num_sensors = num_sensors
+            sensors = st.session_state.sensor_network.deploy_sensors(extent, elev_array)
+            st.success(f"📡 Deployed {len(sensors)} water level sensors")
 
     # Update sensor readings based on current flood conditions
     sensors = st.session_state.sensor_network.update_sensor_readings(extent, global_flood_mask, elev_array, water_level)
     sensor_summary = st.session_state.sensor_network.get_sensor_summary()
 
-    # Stream sensor data to Redis every 10 seconds
+    # Stream sensor data to Redis
     if st.session_state.tweet_generator.redis_connected:
-        success = st.session_state.sensor_network.add_sensor_data_to_stream(
+        st.session_state.sensor_network.add_sensor_data_to_stream(
             st.session_state.tweet_generator.redis_client,
             "sensor_data"
         )
-
 else:
     sensors = []
     sensor_summary = {}
 
 # -------------------------------
-# Create layout with interactive map and minimal status
+# Create layout
 col1, col2 = st.columns([4, 1])
 
 with col1:
@@ -783,207 +897,202 @@ with col1:
 
     if use_interactive_map:
         # Create interactive Plotly map
-        with st.spinner("Creating interactive map..."):
-            try:
-                fig = go.Figure()
+        try:
+            fig = go.Figure()
 
-                # Create custom terrain-like colorscale
-                terrain_colorscale = [
-                    [0.0, '#0066cc'],    [0.1, '#004499'],    [0.2, '#66cc99'],
-                    [0.4, '#99cc66'],    [0.6, '#cccc33'],    [0.8, '#cc9933'],
-                    [1.0, '#996633']
-                ]
+            # Custom terrain colorscale
+            terrain_colorscale = [
+                [0.0, '#0066cc'],    [0.1, '#004499'],    [0.2, '#66cc99'],
+                [0.4, '#99cc66'],    [0.6, '#cccc33'],    [0.8, '#cc9933'],
+                [1.0, '#996633']
+            ]
 
-                # Add elevation heatmap
+            # Add elevation heatmap
+            fig.add_trace(go.Heatmap(
+                z=elev_array,
+                x=np.linspace(extent[0], extent[1], elev_array.shape[1]),
+                y=np.linspace(extent[2], extent[3], elev_array.shape[0]),
+                colorscale=terrain_colorscale,
+                opacity=0.8,
+                name='Elevation',
+                colorbar=dict(title="Elevation (m)", x=1.02)
+            ))
+
+            # Add flood overlay if there's flooding
+            if np.any(global_flood_mask):
+                flood_overlay = np.where(global_flood_mask, 1, np.nan)
                 fig.add_trace(go.Heatmap(
-                    z=elev_array,
+                    z=flood_overlay,
                     x=np.linspace(extent[0], extent[1], elev_array.shape[1]),
                     y=np.linspace(extent[2], extent[3], elev_array.shape[0]),
-                    colorscale=terrain_colorscale,
-                    opacity=0.8,
-                    name='Elevation',
-                    colorbar=dict(title="Elevation (m)", x=1.02)
+                    colorscale=[[0, 'rgba(0,0,255,0)'], [1, 'rgba(0,100,255,0.6)']],
+                    showscale=False,
+                    name='Flood Area',
+                    hovertemplate='Flooded Area<extra></extra>'
                 ))
 
-                # Add flood overlay if there's flooding
-                if np.any(global_flood_mask):
-                    flood_overlay = np.where(global_flood_mask, 1, np.nan)
-                    fig.add_trace(go.Heatmap(
-                        z=flood_overlay,
-                        x=np.linspace(extent[0], extent[1], elev_array.shape[1]),
-                        y=np.linspace(extent[2], extent[3], elev_array.shape[0]),
-                        colorscale=[[0, 'rgba(0,0,255,0)'], [1, 'rgba(0,100,255,0.6)']],
-                        showscale=False,
-                        name='Flood Area',
-                        hovertemplate='Flooded Area<extra></extra>'
-                    ))
+            # Add sensors if enabled
+            if show_sensors and sensors:
+                sensor_colors = {
+                    'normal': 'green',
+                    'caution': 'yellow',
+                    'warning': 'orange',
+                    'critical': 'red'
+                }
 
-                # Add sensors if enabled
-                if show_sensors and sensors:
-                    sensor_colors = {
-                        'normal': 'green',
-                        'caution': 'yellow',
-                        'warning': 'orange',
-                        'critical': 'red'
-                    }
+                for alert_level, color in sensor_colors.items():
+                    level_sensors = [s for s in sensors if s['alert_level'] == alert_level]
+                    if level_sensors:
+                        fig.add_trace(go.Scatter(
+                            x=[s['lon'] for s in level_sensors],
+                            y=[s['lat'] for s in level_sensors],
+                            mode='markers',
+                            marker=dict(
+                                size=sensor_size/10,
+                                color=color,
+                                line=dict(width=2, color='black'),
+                                symbol='circle' if alert_level == 'normal' else
+                                'square' if alert_level == 'caution' else
+                                'triangle-up' if alert_level == 'warning' else 'x'
+                            ),
+                            name=f'{alert_level.title()} Sensors ({len(level_sensors)})',
+                            text=[f"{s['id']}<br>Reading: {s['current_reading']:.2f}m<br>Status: {s['status']}<br>Water Depth: {s.get('water_depth', 0):.2f}m"
+                                  for s in level_sensors],
+                            hovertemplate='%{text}<extra></extra>'
+                        ))
 
-                    for alert_level, color in sensor_colors.items():
-                        level_sensors = [s for s in sensors if s['alert_level'] == alert_level]
-                        if level_sensors:
-                            fig.add_trace(go.Scatter(
-                                x=[s['lon'] for s in level_sensors],
-                                y=[s['lat'] for s in level_sensors],
-                                mode='markers',
-                                marker=dict(
-                                    size=sensor_size/10,
-                                    color=color,
-                                    line=dict(width=2, color='black'),
-                                    symbol='circle' if alert_level == 'normal' else
-                                    'square' if alert_level == 'caution' else
-                                    'triangle-up' if alert_level == 'warning' else 'x'
-                                ),
-                                name=f'{alert_level.title()} Water Level Sensors ({len(level_sensors)})',
-                                text=[f"{s['id']}<br>Type: {s['type']}<br>Reading: {s['current_reading']:.2f}<br>Status: {s['status']}"
-                                      for s in level_sensors],
-                                hovertemplate='%{text}<extra></extra>'
-                            ))
+            # Configure layout
+            fig.update_layout(
+                title=f"Flood Map: {resolved_place}<br>Water Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%",
+                xaxis_title="Longitude (°)",
+                yaxis_title="Latitude (°)",
+                height=700,
+                showlegend=True,
+                legend=dict(x=0, y=1, bgcolor='rgba(255,255,255,0.8)'),
+                hovermode='closest'
+            )
 
-                # Configure layout
-                fig.update_layout(
-                    title=f"Flood Map: {place}<br>Water Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%",
-                    xaxis_title="Longitude (°)",
-                    yaxis_title="Latitude (°)",
-                    height=700,
-                    showlegend=True,
-                    legend=dict(x=0, y=1, bgcolor='rgba(255,255,255,0.8)'),
-                    hovermode='closest'
-                )
+            # Equal aspect ratio
+            fig.update_yaxes(scaleanchor="x", scaleratio=1)
 
-                # Equal aspect ratio
-                fig.update_yaxes(scaleanchor="x", scaleratio=1)
+            # Display the interactive map
+            st.plotly_chart(fig, use_container_width=True, key="flood_map")
 
-                # Display the interactive map (read-only)
-                st.plotly_chart(fig, use_container_width=True, key="flood_map")
+        except Exception as e:
+            st.error(f"Interactive map error: {e}")
+            use_interactive_map = False
 
-            except Exception as e:
-                st.error(f"Interactive map error: {e}")
-                use_interactive_map = False
-
-    # Fallback static map (matplotlib)
+    # Fallback static map
     if not use_interactive_map:
-        with st.spinner("Creating static map..."):
-            try:
-                fig, ax = plt.subplots(figsize=(12, 10), dpi=100)
+        try:
+            fig, ax = plt.subplots(figsize=(12, 10), dpi=100)
 
-                # Plot elevation
-                elev_img = ax.imshow(elev_array, cmap='terrain', extent=extent, origin='upper', alpha=0.9)
-                fig.colorbar(elev_img, ax=ax, label="Elevation (m)", shrink=0.8)
+            # Plot elevation
+            elev_img = ax.imshow(elev_array, cmap='terrain', extent=extent, origin='upper', alpha=0.9)
+            fig.colorbar(elev_img, ax=ax, label="Elevation (m)", shrink=0.8)
 
-                # Plot flood overlay
-                if np.any(global_flood_mask):
-                    flood_overlay = np.ma.masked_where(~global_flood_mask, np.ones_like(global_flood_mask))
-                    ax.imshow(flood_overlay, cmap='Blues', alpha=0.6, extent=extent, origin='upper')
+            # Plot flood overlay
+            if np.any(global_flood_mask):
+                flood_overlay = np.ma.masked_where(~global_flood_mask, np.ones_like(global_flood_mask))
+                ax.imshow(flood_overlay, cmap='Blues', alpha=0.6, extent=extent, origin='upper')
 
-                # Plot sensors if enabled
-                if show_sensors and sensors:
-                    sensor_groups = {
-                        'normal': [],
-                        'caution': [],
-                        'warning': [],
-                        'critical': []
-                    }
+            # Plot sensors if enabled
+            if show_sensors and sensors:
+                sensor_groups = {'normal': [], 'caution': [], 'warning': [], 'critical': []}
+                for sensor in sensors:
+                    sensor_groups[sensor['alert_level']].append(sensor)
 
-                    for sensor in sensors:
-                        sensor_groups[sensor['alert_level']].append(sensor)
+                group_styles = {
+                    'normal': {'color': 'green', 'marker': 'o', 'size_mult': 0.8, 'label': 'Normal'},
+                    'caution': {'color': 'yellow', 'marker': 's', 'size_mult': 1.0, 'label': 'Caution'},
+                    'warning': {'color': 'orange', 'marker': '^', 'size_mult': 1.2, 'label': 'Warning'},
+                    'critical': {'color': 'red', 'marker': 'X', 'size_mult': 1.5, 'label': 'Critical'}
+                }
 
-                    group_styles = {
-                        'normal': {'color': 'green', 'marker': 'o', 'size_mult': 0.8, 'label': 'Normal'},
-                        'caution': {'color': 'yellow', 'marker': 's', 'size_mult': 1.0, 'label': 'Caution'},
-                        'warning': {'color': 'orange', 'marker': '^', 'size_mult': 1.2, 'label': 'Warning'},
-                        'critical': {'color': 'red', 'marker': 'X', 'size_mult': 1.5, 'label': 'Critical'}
-                    }
+                for alert_level, group_sensors in sensor_groups.items():
+                    if group_sensors:
+                        style = group_styles[alert_level]
+                        lats = [s['lat'] for s in group_sensors]
+                        lons = [s['lon'] for s in group_sensors]
 
-                    for alert_level, group_sensors in sensor_groups.items():
-                        if group_sensors:
-                            style = group_styles[alert_level]
-                            lats = [s['lat'] for s in group_sensors]
-                            lons = [s['lon'] for s in group_sensors]
+                        ax.scatter(lons, lats,
+                                   c=style['color'],
+                                   marker=style['marker'],
+                                   s=sensor_size * style['size_mult'],
+                                   alpha=0.9,
+                                   edgecolors='black',
+                                   linewidth=2,
+                                   label=f"{style['label']} ({len(group_sensors)})",
+                                   zorder=10)
 
-                            ax.scatter(lons, lats,
-                                       c=style['color'],
-                                       marker=style['marker'],
-                                       s=sensor_size * style['size_mult'],
-                                       alpha=0.9,
-                                       edgecolors='black',
-                                       linewidth=2,
-                                       label=f"{style['label']} ({len(group_sensors)})",
-                                       zorder=10)
+            ax.set_xlabel("Longitude (°)")
+            ax.set_ylabel("Latitude (°)")
+            ax.set_title(f"Flood Simulation: {resolved_place}\nWater Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%")
+            ax.grid(True, alpha=0.3)
 
-                ax.set_xlabel("Longitude (°)")
-                ax.set_ylabel("Latitude (°)")
-                ax.set_title(f"Flood Simulation: {place}\nWater Level: {water_level}m | Flooded Area: {flooded_area_pct:.1f}%")
-                ax.grid(True, alpha=0.3)
+            if show_sensors and sensors:
+                ax.legend(loc='upper left', title='Sensor Status', frameon=True, fancybox=True, shadow=True)
 
-                if show_sensors and sensors:
-                    ax.legend(loc='upper left', title='Sensor Status', frameon=True, fancybox=True, shadow=True)
+            st.pyplot(fig, clear_figure=True, use_container_width=True)
+            plt.close(fig)
 
-                st.pyplot(fig, clear_figure=True, use_container_width=True)
-                plt.close(fig)
-
-            except Exception as e:
-                st.error(f"Map rendering error: {e}")
+        except Exception as e:
+            st.error(f"Map rendering error: {e}")
 
 with col2:
-    st.subheader("📊 Streaming Status")
+    st.subheader("📊 Live Status")
 
     # Redis connection status
     if st.session_state.tweet_generator.redis_connected:
         st.success("🟢 Redis Connected")
     else:
         st.error("🔴 Redis Disconnected")
-        st.caption("Data streams disabled")
+        st.caption("Install Redis: `pip install redis && redis-server`")
 
     st.write("---")
 
     # Sensor statistics
     if show_sensors and sensor_summary:
-        st.subheader("📡 Water Level Sensors")
-        st.metric("Total Sensors", sensor_summary['total_sensors'])
-        st.metric("Critical Alerts", sensor_summary['critical_alerts'])
-        st.metric("Warning Alerts", sensor_summary['warning_alerts'])
-        st.metric("Operational", sensor_summary['operational'])
+        st.subheader("📡 Sensor Network")
+        col_s1, col_s2 = st.columns(2)
+
+        with col_s1:
+            st.metric("Total", sensor_summary['total_sensors'])
+            st.metric("Critical", sensor_summary['critical_alerts'])
+
+        with col_s2:
+            st.metric("Operational", sensor_summary['operational'])
+            st.metric("Warning", sensor_summary['warning_alerts'])
 
     st.write("---")
 
-    # Tweet stream statistics (without showing content)
+    # Tweet stream statistics
     if tweet_enabled:
-        st.subheader("🐦 Continuous Tweet Stream")
+        st.subheader("🐦 Tweet Stream")
         tweet_stats = st.session_state.tweet_generator.get_stream_stats()
 
         if tweet_stats['connected']:
             st.metric("Total Tweets", tweet_stats['total_messages'])
-            st.metric("Rate (per min)", tweet_rate)
-            flooding_pct = (np.sum(global_flood_mask) / global_flood_mask.size) * 100
-            if flooding_pct > 1:
-                st.caption("🌊 Flood mode: More flood tweets")
-            else:
-                st.caption("☀️ Normal mode: Mixed content")
-        else:
-            st.error("Stream not available")
+            st.metric("Rate/min", tweet_rate)
 
-    # Manual refresh button
-    if st.button("🔄 Force Update", type="primary"):
-        if show_sensors and st.session_state.tweet_generator.redis_connected:
-            st.session_state.sensor_network.add_sensor_data_to_stream(
-                st.session_state.tweet_generator.redis_client,
-                "sensor_data"
-            )
-        st.rerun()
+            if flooded_area_pct > 1:
+                st.caption("🌊 Flood mode active")
+            else:
+                st.caption("☀️ Normal conditions")
+        else:
+            st.error("Stream unavailable")
+
+    # Quick stats
+    st.write("---")
+    st.subheader("📈 Quick Stats")
+    st.write(f"🌍 **Elevation**: {np.nanmin(elev_array):.0f}m - {np.nanmax(elev_array):.0f}m")
+    st.write(f"💧 **Water Level**: {water_level}m")
+    st.write(f"🌊 **Flooded**: {flooded_area_pct:.1f}%")
 
 # -------------------------------
-# Background data generation - Continuous streaming
+# Background data generation
 if st.session_state.tweet_generator.redis_connected:
-    city_name = place.split(',')[0]
+    city_name = resolved_place.split(',')[0]
 
     # Generate continuous tweets
     if tweet_enabled:
@@ -991,83 +1100,69 @@ if st.session_state.tweet_generator.redis_connected:
             extent, global_flood_mask, elev_array, water_level, city_name, tweet_rate
         )
 
-        # Stream all generated tweets to Redis
+        # Stream tweets to Redis
         for tweet in new_tweets:
             st.session_state.tweet_generator.add_tweet_to_stream(tweet)
 
 # -------------------------------
-# Bottom statistics dashboard
+# Bottom dashboard
 st.subheader("📊 Simulation Dashboard")
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 with col1:
-    st.metric("Global Water Level", f"{water_level} m")
+    st.metric("Water Level", f"{water_level}m")
 with col2:
-    st.metric("Total Flooded Area", f"{flooded_area_pct:.1f}%")
+    st.metric("Flooded Area", f"{flooded_area_pct:.1f}%")
 with col3:
-    st.metric("Elevation Range", f"{np.nanmin(elev_array):.0f}m - {np.nanmax(elev_array):.0f}m")
+    st.metric("Elevation Range", f"{np.nanmax(elev_array) - np.nanmin(elev_array):.0f}m")
 with col4:
     if tweet_enabled and st.session_state.tweet_generator.redis_connected:
         tweet_stats = st.session_state.tweet_generator.get_stream_stats()
-        st.metric("Tweets Streamed", tweet_stats['total_messages'])
+        st.metric("Tweets", tweet_stats['total_messages'])
     else:
-        st.metric("Tweets Streamed", "Disabled")
+        st.metric("Tweets", "Disabled")
 with col5:
     if show_sensors and sensor_summary:
-        st.metric("Active Sensors", sensor_summary['operational'])
+        st.metric("Active Sensors", f"{sensor_summary['operational']}/{sensor_summary['total_sensors']}")
     else:
-        st.metric("Active Sensors", "0")
+        st.metric("Sensors", "Disabled")
 with col6:
-    st.metric("Water Level Sensors", f"{len(sensors) if sensors else 0} sensors")
+    critical_count = sensor_summary.get('critical_alerts', 0) if sensor_summary else 0
+    st.metric("Critical Alerts", critical_count, delta=critical_count if critical_count > 0 else None)
 
-# Detailed sensor data table (if sensors enabled)
+# Sensor details table
 if show_sensors and sensors:
-    st.subheader("📋 Water Level Sensor Network Details")
+    with st.expander("📋 Detailed Sensor Data", expanded=False):
+        sensor_data = []
+        for sensor in sensors:
+            sensor_data.append({
+                'Sensor ID': sensor['id'],
+                'Location': f"{sensor['lat']:.4f}, {sensor['lon']:.4f}",
+                'Elevation': f"{sensor['elevation']:.1f}m",
+                'Reading': f"{sensor['current_reading']:.2f}m",
+                'Water Depth': f"{sensor.get('water_depth', 0):.2f}m",
+                'Alert Level': sensor['alert_level'],
+                'Status': sensor['status'],
+                'Battery': f"{sensor.get('battery_level', 100):.0f}%",
+                'Signal': f"{sensor.get('signal_strength', 100):.0f}%"
+            })
 
-    # Create sensor DataFrame
-    sensor_data = []
-    for sensor in sensors:
-        sensor_data.append({
-            'ID': sensor['id'],
-            'Type': 'Water Level',
-            'Location': f"{sensor['lat']:.4f}, {sensor['lon']:.4f}",
-            'Elevation': f"{sensor['elevation']:.1f}m",
-            'Water Level Reading': f"{sensor['current_reading']:.2f}m",
-            'Water Depth': f"{sensor.get('water_depth', 0):.1f}m",
-            'Alert Level': sensor['alert_level'],
-            'Status': sensor['status'],
-            'Last Update': sensor['last_update'].strftime('%H:%M:%S')
-        })
+        df = pd.DataFrame(sensor_data)
+        st.dataframe(df, use_container_width=True)
 
-    df = pd.DataFrame(sensor_data)
+# Information panels
+col_info1, col_info2 = st.columns(2)
 
-    # Color-code the table based on alert level
-    def color_alert_level(val):
-        if val == 'critical':
-            return 'background-color: #ffcccc'
-        elif val == 'warning':
-            return 'background-color: #fff3cd'
-        elif val == 'caution':
-            return 'background-color: #d1ecf1'
-        else:
-            return 'background-color: #d4edda'
+with col_info1:
+    st.info("📡 **Data Streaming**: Sensors update every 10 seconds, tweets generate based on flood conditions")
 
-    styled_df = df.style.applymap(color_alert_level, subset=['Alert Level'])
-    st.dataframe(styled_df, use_container_width=True, height=300)
+with col_info2:
+    st.info("🐦 **Tweet Generation**: Realistic social media simulation with flood-aware content generation")
 
-st.info("📡 **Sensor Data**: Water level sensors stream data to Redis every 10 seconds")
-st.info("🐦 **Tweet Data**: Continuous tweet generation based on flood conditions and city activity")
+# Warning and auto-refresh
+st.warning("⚠️ Educational simulation only. Real flood modeling requires meteorological data, drainage systems, and temporal dynamics.")
 
-st.warning("⚠️ This is a simplified flood simulation for educational purposes only. Real flood modeling requires additional factors like rainfall, drainage, soil permeability, and temporal dynamics.")
-
-# Auto-refresh mechanism for continuous data streaming
+# Auto-refresh for continuous operation
 if tweet_enabled or show_sensors:
-    # Initialize auto-refresh counter
-    if 'auto_refresh_counter' not in st.session_state:
-        st.session_state.auto_refresh_counter = 0
-
-    # Auto-refresh to maintain continuous streaming
-    auto_refresh = st.sidebar.checkbox("Auto-refresh for continuous streaming", value=True)
-    if auto_refresh:
-        time.sleep(1)  # Fast refresh for continuous streaming
-        st.rerun()
+    time.sleep(2)  # Update every 2 seconds for responsive streaming
+    st.rerun()
